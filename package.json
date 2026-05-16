@@ -11,7 +11,8 @@
     "build": "tsc --noEmit",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "check": "npm run build"
+    "test": "tsx --test test/**/*.test.ts",
+    "check": "npm run build && npm run test"
   },
   "dependencies": {
     "discord.js": "^14.19.3",
