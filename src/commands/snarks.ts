@@ -129,31 +129,31 @@ const preciousMetalAliases = new Set(["gold", "silver", "platinum", "palladium",
 export const snarkCommands: Command[] = [
   {
     name: "make",
-    description: "A legacy Banjo retort.",
+    description: "A Banjo retort.",
     category: "snarks",
     execute: () => "Make it yourself.",
   },
   {
     name: "sudo",
-    description: "A legacy Banjo retort.",
+    description: "A Banjo retort.",
     category: "snarks",
     execute: () => "Ok.",
   },
   {
     name: "donut",
-    description: "A legacy Banjo snack.",
+    description: "A Banjo snack.",
     category: "snarks",
     execute: () => "*Yummeh*",
   },
   {
     name: "suicide",
-    description: "Show the legacy support hotline response.",
+    description: "Show the support hotline response.",
     category: "snarks",
     execute: () => "National Suicide Prevention Lifeline: `1-800-273-8255`",
   },
   {
     name: "roll",
-    description: "Roll a fair legacy die.",
+    description: "Roll a fair die.",
     usage: "roll",
     category: "snarks",
     execute: () =>
@@ -195,7 +195,7 @@ export const snarkCommands: Command[] = [
   },
   {
     name: "carousel",
-    description: "Report the status of the legacy Bittrex markets carousel.",
+    description: "Report the status of the retired Bittrex markets carousel.",
     usage: "carousel",
     category: "snarks",
     execute: () => "The legacy Bittrex markets carousel is no longer available.",
@@ -217,7 +217,7 @@ export const snarkCommands: Command[] = [
   },
   {
     name: "alexa",
-    description: "Report the status of the legacy Alexa traffic graph.",
+    description: "Report the status of the retired Alexa traffic graph.",
     usage: "alexa <domain>",
     category: "snarks",
     execute: (_context, args) => {
@@ -228,7 +228,7 @@ export const snarkCommands: Command[] = [
   },
   {
     name: "ego",
-    description: "Report the status of the legacy ICNDB joke lookup.",
+    description: "Report the status of the retired ICNDB joke lookup.",
     usage: "ego <name...>",
     category: "snarks",
     execute: (_context, args) => {
@@ -240,14 +240,14 @@ export const snarkCommands: Command[] = [
   {
     name: "say",
     aliases: ["vo"],
-    description: "Report the status of the legacy voice synthesis command.",
+    description: "Report the status of the retired voice synthesis command.",
     usage: "say <voice> <text>",
     category: "snarks",
     execute: () => "The legacy voice synthesis service is no longer available.",
   },
   {
     name: "snark",
-    description: "Return the legacy snark fallback text.",
+    description: "Return the snark fallback text.",
     usage: "snark",
     category: "snarks",
     execute: () => "It will self-correct.",
@@ -255,26 +255,26 @@ export const snarkCommands: Command[] = [
   {
     name: "gold",
     aliases: ["silver", "platinum", "palladium", "rhodium"],
-    description: "Show the legacy Kitco precious metals spot-price image.",
+    description: "Show the Kitco precious metals spot-price image.",
     category: "snarks",
     execute: () => "https://www.kitconet.com/images/sp_en_8.gif",
   },
   {
     name: "ricky!",
-    description: "Send the legacy Ricky image.",
+    description: "Send the Ricky image.",
     category: "snarks",
     execute: () => ({ files: [assetPath("ricky.gif")] }),
   },
   {
     name: "kappa",
-    description: "Send the legacy Kappa image.",
+    description: "Send the Kappa image.",
     category: "snarks",
     execute: () => ({ files: [assetPath("kappa.png")] }),
   },
   {
     name: "hydrogen",
     aliases: [...elements].filter((name) => name !== "hydrogen" && !preciousMetalAliases.has(name)),
-    description: "Run the legacy element lookup.",
+    description: "Run the element lookup.",
     usage: "<element>",
     category: "snarks",
     execute: ({ commandName }) => wolframAlphaUrl(commandName),

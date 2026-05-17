@@ -3,27 +3,27 @@ import type { Command } from "./types.js";
 const assetPath = (fileName: string) => new URL(`../../assets/images/${fileName}`, import.meta.url).pathname;
 
 const staticLinks: Array<[name: string, description: string, response: string, aliases?: string[]]> = [
-  ["banjo", "Show the legacy Banjo introduction.", "https://hive.blog/@inertia/introducing-banjo"],
+  ["banjo", "Show the Banjo introduction.", "https://hive.blog/@inertia/introducing-banjo"],
   ["faq", "Show the Hive FAQ.", "https://hive.blog/faq.html?utm_source=banjo"],
   ["welcome", "Show the Hive welcome page.", "https://hive.blog/welcome?utm_source=banjo"],
   ["whitepaper", "Show the Hive whitepaper.", "https://hive.io/whitepaper.pdf"],
   ["tools", "Show Hive project tools.", "https://hiveprojects.io/"],
   ["github", "Show the Hive Git repository.", "https://gitlab.syncad.com/hive"],
   ["releases", "Show Hive releases.", "https://gitlab.syncad.com/hive/hive/-/releases"],
-  ["scam", "Show the legacy scam explainer link.", "https://www.youtube.com/watch?v=ntoJNuzlTSA"],
+  ["scam", "Show the scam explainer link.", "https://www.youtube.com/watch?v=ntoJNuzlTSA"],
   [
     "password",
-    "Show the legacy password management link.",
+    "Show the password management link.",
     "https://hive.blog/@thedegensloth/how-to-login-to-steemit-correctly-proper-password-management",
   ],
-  ["watch", "Show the legacy watch link.", "https://www.youtube.com/watch?v=VAesMQ6VtK8"],
+  ["watch", "Show the watch link.", "https://www.youtube.com/watch?v=VAesMQ6VtK8"],
   ["pancake", "Serve pancakes.", "https://www.youtube.com/watch?v=GuKV2Z3eYTY", ["pancakes"]],
   ["popcorn", "Serve popcorn.", "https://media.giphy.com/media/guufsF0Az3Lpu/giphy.gif"],
 ];
 
 const staticImageLinks: Array<[name: string, description: string, fileName: string]> = [
-  ["bandwagon", "Show the legacy bandwagon image.", "bandwagon.jpg"],
-  ["headphones", "Show the legacy headphones image.", "headphones.jpg"],
+  ["bandwagon", "Show the bandwagon image.", "bandwagon.jpg"],
+  ["headphones", "Show the headphones image.", "headphones.jpg"],
 ];
 
 const musicLinks = {
@@ -126,7 +126,7 @@ export const linkCommands: Command[] = [
   })),
   {
     name: "music",
-    description: "Pick legacy Banjo music.",
+    description: "Pick Banjo music.",
     usage: "music [debugging|coding|trading|dump]",
     category: "links",
     execute: (_context, args) => {
@@ -137,7 +137,7 @@ export const linkCommands: Command[] = [
   },
   {
     name: "fallacy",
-    description: "Look up a concise legacy fallacy note.",
+    description: "Look up a concise fallacy note.",
     usage: "fallacy [query]",
     category: "links",
     execute: (_context, args) => {

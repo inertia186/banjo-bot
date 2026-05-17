@@ -504,7 +504,7 @@ export const hiveCommands: Command[] = [
   },
   {
     name: "inflation",
-    description: "Project the legacy Hive inflation schedule.",
+    description: "Project the historical Hive inflation schedule.",
     usage: "inflation [years] [hive]",
     category: "hive",
     execute: async (_context, args) => {

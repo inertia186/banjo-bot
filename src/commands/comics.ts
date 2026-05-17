@@ -4,7 +4,7 @@ import type { Command, CommandContext } from "./types.js";
 export const comicCommands: Command[] = [
   {
     name: "dilbert",
-    description: "Report the status of the legacy Dilbert mirror.",
+    description: "Report the status of the retired Dilbert mirror.",
     usage: "dilbert",
     category: "snarks",
     execute: () => "The legacy Dilbert image mirror is no longer available.",

@@ -185,6 +185,15 @@ test("help for a selected alias resolves the canonical command", async () => {
   assert.ok(embed.fields?.some((field) => field.name === "Aliases" && field.value === "`$pancakes`"));
 });
 
+test("help descriptions do not label commands as legacy", () => {
+  const commands = registry();
+  const legacyDescriptions = [...new Set(commands.values())]
+    .filter((command) => /\blegacy\b/i.test(command.description))
+    .map((command) => command.name);
+
+  assert.deepEqual(legacyDescriptions, []);
+});
+
 test("explicitly disabled legacy commands keep their legacy messages", async () => {
   const commands = registry();
 
