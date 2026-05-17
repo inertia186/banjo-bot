@@ -36,4 +36,8 @@ export type Command = {
   execute(context: CommandContext, args: string[]): Promise<CommandResponse> | CommandResponse;
 };
 
-export type CommandResponse = string | MessageReplyOptions | void;
+export type CommandReplyOptions = MessageReplyOptions & {
+  afterSend?: (reply: Message) => Promise<void> | void;
+};
+
+export type CommandResponse = string | CommandReplyOptions | void;

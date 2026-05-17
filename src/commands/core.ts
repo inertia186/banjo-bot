@@ -1,4 +1,15 @@
-import type { Command } from "./types.js";
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  StringSelectMenuBuilder,
+  type ButtonInteraction,
+  type GuildEmoji,
+  type Message,
+  type StringSelectMenuInteraction,
+} from "discord.js";
+import type { Command, CommandReplyOptions } from "./types.js";
 
 export const coreCommands: Command[] = [
   {
@@ -173,51 +184,327 @@ export const coreCommands: Command[] = [
     description: "List available commands.",
     usage: "help [command]",
     category: "core",
-    execute: ({ message, config }, args) => {
+    execute: async ({ message, config }, args) => {
       const registry = message.client.commands;
       const prefix = config.commandPrefix;
       const selectedName = args[0]?.toLowerCase();
+      const categoryLabels = await resolveCategoryLabels(message);
 
       if (selectedName) {
         const command = registry.get(selectedName);
         if (!command) return `Cannot find help for: ${selectedName}`;
 
-        return [
-          `**${prefix}${command.usage ?? command.name}**`,
-          command.description,
-          command.aliases?.length ? `Aliases: ${command.aliases.join(", ")}` : null,
-        ]
-          .filter(Boolean)
-          .join("\n");
+        return helpCommandEmbed(command, prefix, categoryLabels);
       }
 
-      const visibleCommands = [...new Map([...registry.values()].map((command) => [command.name, command])).values()];
-      const byCategory = visibleCommands.reduce<Record<string, Command[]>>((memo, command) => {
-        const categoryCommands = (memo[command.category] ??= []);
-        categoryCommands.push(command);
-        return memo;
-      }, {});
-
-      const sections = Object.entries(byCategory).map(([category, commands]) => {
-        const sortedCommands = commands.sort((left, right) => left.name.localeCompare(right.name));
-
-        if (category === "legacy") {
-          return [
-            "**legacy**",
-            `${sortedCommands.length} placeholders are registered. Use \`${prefix}help <command>\` for details.`,
-          ].join("\n");
-        }
-
-        return [
-          `**${category}**`,
-          sortedCommands.map((command) => `\`${prefix}${command.name}\``).join(", "),
-        ].join("\n");
-      });
-
-      return [...sections, `Use \`${prefix}help <command>\` for command details.`].join("\n\n");
+      return paginatedHelpEmbed(visibleCommands(registry), prefix, categoryLabels);
     },
   },
 ];
+
+type HelpPage = {
+  title: string;
+  description: string;
+  fields: Array<{ name: string; value: string; inline?: boolean }>;
+  commands: Command[];
+  category: Command["category"] | null;
+};
+
+type HelpCategory = {
+  category: Command["category"];
+  commands: Command[];
+};
+
+const categoryEmoji: Record<Command["category"], string> = {
+  core: "Banjo",
+  links: "🔗",
+  snarks: "Snarks",
+  hive: "Hive",
+  legacy: "🗄️",
+};
+
+function helpCommandEmbed(command: Command, prefix: string, categoryLabels: Record<Command["category"], string>): CommandReplyOptions {
+  const embed = baseHelpEmbed(`Help: ${prefix}${command.name}`, `\`${prefix}${command.usage ?? command.name}\``)
+    .addFields(
+      { name: "What it does", value: command.description },
+      ...(command.aliases?.length ? [{ name: "Aliases", value: command.aliases.map((alias) => `\`${prefix}${alias}\``).join(", ") }] : []),
+      { name: "Category", value: categoryLabel(command.category, categoryLabels), inline: true },
+    );
+
+  return { embeds: [embed] };
+}
+
+function paginatedHelpEmbed(commands: Command[], prefix: string, categoryLabels: Record<Command["category"], string>): CommandReplyOptions {
+  const pages = buildHelpPages(commands, prefix, categoryLabels);
+
+  return {
+    embeds: [renderHelpPage(pages[0]!, 0, pages.length)],
+    components: renderHelpComponents(pages[0]!, 0, pages, prefix),
+  };
+}
+
+function buildHelpPages(commands: Command[], prefix: string, categoryLabels: Record<Command["category"], string>): HelpPage[] {
+  const byCategory = commands.reduce<Record<string, Command[]>>((memo, command) => {
+    const categoryCommands = (memo[command.category] ??= []);
+    categoryCommands.push(command);
+    return memo;
+  }, {});
+
+  const categories: HelpCategory[] = Object.entries(byCategory)
+    .map(([category, categoryCommands]) => ({
+      category: category as Command["category"],
+      commands: categoryCommands.sort((left, right) => left.name.localeCompare(right.name)),
+    }))
+    .sort((left, right) => categoryOrder(left.category) - categoryOrder(right.category));
+
+  const overview: HelpPage = {
+    title: "Banjo Help",
+    description: [
+      "Browse command groups with buttons and the command menu.",
+      `Use \`${prefix}help <command>\` for a focused command card.`,
+    ].join("\n"),
+    fields: categories.map(({ category, commands }) => ({
+      name: categoryLabel(category, categoryLabels),
+      value: `${commands.length} command${commands.length === 1 ? "" : "s"}`,
+      inline: true,
+    })),
+    commands: [],
+    category: null,
+  };
+
+  const categoryPages = categories.flatMap(({ category, commands }) =>
+    chunk(commands, 10).map((commandChunk, index, categoryChunks) => ({
+      title: `${categoryLabel(category, categoryLabels)} Commands${categoryChunks.length > 1 ? ` ${index + 1}/${categoryChunks.length}` : ""}`,
+      description: `Use \`${prefix}help <command>\` for usage and aliases.`,
+      fields: commandChunk.map((command) => ({
+        name: `${prefix}${command.name}`,
+        value: command.description,
+      })),
+      commands: commandChunk,
+      category,
+    })),
+  );
+
+  return [overview, ...categoryPages];
+}
+
+function renderHelpPage(page: HelpPage, pageIndex: number, pageCount: number): EmbedBuilder {
+  return baseHelpEmbed(page.title, page.description)
+    .addFields(page.fields)
+    .setFooter({
+      text: `Page ${pageIndex + 1}/${pageCount}`,
+    });
+}
+
+const helpComponentPrefix = "help";
+const helpCommandSelectPrefix = `${helpComponentPrefix}:select`;
+const helpCategorySelectId = `${helpComponentPrefix}:category`;
+const helpPageButtonPrefix = `${helpComponentPrefix}:page`;
+const helpCloseButtonId = `${helpComponentPrefix}:close`;
+
+function renderHelpCommandEmbed(command: Command, prefix: string, categoryLabels: Record<Command["category"], string>): EmbedBuilder {
+  return baseHelpEmbed(`Help: ${prefix}${command.name}`, `\`${prefix}${command.usage ?? command.name}\``)
+    .addFields(
+      { name: "What it does", value: command.description },
+      ...(command.aliases?.length ? [{ name: "Aliases", value: command.aliases.map((alias) => `\`${prefix}${alias}\``).join(", ") }] : []),
+      { name: "Category", value: categoryLabel(command.category, categoryLabels), inline: true },
+    );
+}
+
+function renderHelpComponents(page: HelpPage, pageIndex: number, pages: HelpPage[], prefix: string): Array<ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>> {
+  const pageCount = pages.length;
+  const options = page.commands.slice(0, 25).map((command) => ({
+    label: `${prefix}${command.name}`,
+    value: command.name,
+    description: truncateSelectDescription(command.description),
+  }));
+
+  const categoryOptions = firstCategoryPageIndexes(pages).map(({ category, pageIndex: categoryPageIndex }) => ({
+    label: titleCase(category),
+    value: String(categoryPageIndex),
+    default: page.category === category,
+  }));
+
+  const categorySelect = new StringSelectMenuBuilder()
+    .setCustomId(helpCategorySelectId)
+    .setPlaceholder(page.category ? `Category: ${titleCase(page.category)}` : "Choose a category")
+    .addOptions(categoryOptions);
+
+  const commandSelect = new StringSelectMenuBuilder()
+    .setCustomId(`${helpCommandSelectPrefix}:${pageIndex}`)
+    .setPlaceholder(page.commands.length > 0 ? "Choose a command for details" : "Choose a category first")
+    .setDisabled(options.length === 0)
+    .addOptions(options.length > 0 ? options : [{ label: "No commands on this page", value: "none" }]);
+
+  const previousPage = (pageIndex - 1 + pageCount) % pageCount;
+  const nextPage = (pageIndex + 1) % pageCount;
+  const navigation = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${helpPageButtonPrefix}:previous:${previousPage}`)
+      .setLabel("Previous")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`${helpPageButtonPrefix}:home:0`)
+      .setLabel("Home")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`${helpPageButtonPrefix}:next:${nextPage}`)
+      .setLabel("Next")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(helpCloseButtonId)
+      .setLabel("Close")
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  return [
+    navigation,
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(categorySelect),
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(commandSelect),
+  ];
+}
+
+function firstCategoryPageIndexes(pages: HelpPage[]): Array<{ category: Command["category"]; pageIndex: number }> {
+  const seen = new Set<Command["category"]>();
+  const indexes: Array<{ category: Command["category"]; pageIndex: number }> = [];
+
+  pages.forEach((page, pageIndex) => {
+    if (!page.category || seen.has(page.category)) return;
+
+    seen.add(page.category);
+    indexes.push({ category: page.category, pageIndex });
+  });
+
+  return indexes;
+}
+
+function truncateSelectDescription(value: string): string {
+  return value.length <= 100 ? value : `${value.slice(0, 97)}...`;
+}
+
+export async function handleHelpInteraction(interaction: ButtonInteraction | StringSelectMenuInteraction, prefix: string): Promise<boolean> {
+  if (!isHelpInteraction(interaction)) return false;
+
+  await interaction.deferUpdate();
+
+  if (interaction.isButton() && interaction.customId === helpCloseButtonId) {
+    await interaction.message.delete().catch(() => undefined);
+    return true;
+  }
+
+  const commands = visibleCommands(interaction.client.commands);
+  const categoryLabels = await resolveCategoryLabels(interaction);
+  const pages = buildHelpPages(commands, prefix, categoryLabels);
+
+  if (interaction.isButton()) {
+    const pageIndex = boundedPageIndex(Number(interaction.customId.split(":").at(-1)), pages.length);
+
+    await interaction.message.edit({
+      embeds: [renderHelpPage(pages[pageIndex]!, pageIndex, pages.length)],
+      components: renderHelpComponents(pages[pageIndex]!, pageIndex, pages, prefix),
+    });
+    return true;
+  }
+
+  if (interaction.customId === helpCategorySelectId) {
+    const pageIndex = boundedPageIndex(Number(interaction.values[0]), pages.length);
+
+    await interaction.message.edit({
+      embeds: [renderHelpPage(pages[pageIndex]!, pageIndex, pages.length)],
+      components: renderHelpComponents(pages[pageIndex]!, pageIndex, pages, prefix),
+    });
+    return true;
+  }
+
+  const pageIndex = boundedPageIndex(Number(interaction.customId.slice(`${helpCommandSelectPrefix}:`.length)), pages.length);
+  const command = commands.find((candidate) => candidate.name === interaction.values[0]);
+  if (!command) {
+    return true;
+  }
+
+  await interaction.message.edit({
+    embeds: [renderHelpCommandEmbed(command, prefix, categoryLabels)],
+    components: renderHelpComponents(pages[pageIndex]!, pageIndex, pages, prefix),
+  });
+  return true;
+}
+
+function isHelpInteraction(interaction: ButtonInteraction | StringSelectMenuInteraction): boolean {
+  return (interaction.isButton() && (interaction.customId.startsWith(`${helpPageButtonPrefix}:`) || interaction.customId === helpCloseButtonId))
+    || (interaction.isStringSelectMenu() && (interaction.customId.startsWith(`${helpCommandSelectPrefix}:`) || interaction.customId === helpCategorySelectId));
+}
+
+function visibleCommands(registry: Map<string, Command>): Command[] {
+  return [...new Map([...registry.values()].map((command) => [command.name, command])).values()];
+}
+
+function boundedPageIndex(value: number, pageCount: number): number {
+  return Number.isInteger(value) && value >= 0 && value < pageCount ? value : 0;
+}
+
+function baseHelpEmbed(title: string, description: string): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(0xf5a623)
+    .setAuthor({ name: "Banjo Command Guide" })
+    .setTitle(title)
+    .setDescription(description);
+}
+
+function titleCase(value: string): string {
+  return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+function categoryLabel(category: Command["category"], categoryLabels: Record<Command["category"], string>): string {
+  return categoryLabels[category];
+}
+
+type HelpEmojiSource = Pick<Message, "client" | "guild">;
+
+async function resolveCategoryLabels(source: HelpEmojiSource): Promise<Record<Command["category"], string>> {
+  const cachedEmojis = [
+    ...source.guild?.emojis.cache.values() ?? [],
+    ...source.client.emojis?.cache.values() ?? [],
+  ];
+
+  const fetchedEmojis = await source.guild?.emojis.fetch().catch(() => null);
+  const emojis = fetchedEmojis ? [...cachedEmojis, ...fetchedEmojis.values()] : cachedEmojis;
+
+  return {
+    core: customCategoryLabel("banjo", "Banjo", emojis),
+    links: `${categoryEmoji.links} ${titleCase("links")}`,
+    snarks: customCategoryLabel("nicetry001", "Snarks", emojis),
+    hive: customCategoryLabel("hivertinyji", "Hive", emojis),
+    legacy: `${categoryEmoji.legacy} ${titleCase("legacy")}`,
+  };
+}
+
+function customCategoryLabel(emojiName: string, label: string, emojis: GuildEmoji[]): string {
+  const emoji = findEmoji(emojiName, emojis);
+  return emoji ? `${emoji} ${label}` : label;
+}
+
+function findEmoji(name: string, emojis: GuildEmoji[]): GuildEmoji | null {
+  const normalizedTarget = normalizeEmojiName(name);
+  return emojis.find((emoji) => normalizeEmojiName(emoji.name ?? "") === normalizedTarget) ?? null;
+}
+
+function normalizeEmojiName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function categoryOrder(category: Command["category"]): number {
+  return ["core", "hive", "links", "snarks", "legacy"].indexOf(category);
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
 
 type BirthdayEntry = {
   name: string;

@@ -9,6 +9,7 @@ import {
 } from "discord.js";
 import { parseCommand } from "./command-parser.js";
 import { loadConfig } from "./config.js";
+import { handleHelpInteraction } from "./commands/core.js";
 import { registerCommands } from "./commands/index.js";
 import { UserFacingCommandError } from "./commands/hive.js";
 import { LlmChat } from "./llm/chat.js";
@@ -23,10 +24,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.DirectMessageReactions,
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+  partials: [Partials.Channel, Partials.Message],
 });
 
 registerCommands(client);
@@ -55,7 +54,15 @@ client.on("messageCreate", async (message) => {
 
   try {
     const response = await command.execute({ message, config, logger, commandName: parsed.name }, parsed.args);
-    if (response) await message.reply(response);
+    if (response) {
+      if (typeof response === "string") {
+        await message.reply(response);
+      } else {
+        const { afterSend, ...replyOptions } = response;
+        const reply = await message.reply(replyOptions);
+        await afterSend?.(reply);
+      }
+    }
   } catch (error) {
     if (error instanceof UserFacingCommandError) {
       await message.reply(error.message);
@@ -67,6 +74,26 @@ client.on("messageCreate", async (message) => {
       error: error instanceof Error ? error.message : String(error),
     });
     await message.reply("Sorry, that command failed while Banjo is still being rebuilt.");
+  }
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
+
+  try {
+    await handleHelpInteraction(interaction, config.commandPrefix);
+  } catch (error) {
+    logger.error("Interaction failed.", {
+      customId: interaction.customId,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.reply({ content: "Sorry, that control failed.", ephemeral: true }).catch(() => undefined);
+    } else if (interaction.isRepliable()) {
+      await interaction.followUp({ content: "Sorry, that control failed.", ephemeral: true }).catch(() => undefined);
+    }
   }
 });
 

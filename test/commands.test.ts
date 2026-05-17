@@ -105,11 +105,44 @@ test("help lists each command once despite aliases", async () => {
   const commands = registry();
   const response = await commands.get("help")?.execute(context(commands), []);
 
-  assert.equal(typeof response, "string");
-  assert.ok((response as string).length <= 2_000);
-  assert.match(response as string, /\*\*core\*\*/);
-  assert.doesNotMatch(response as string, /placeholders are registered/);
-  assert.equal((response as string).match(/`\$pancake`/g)?.length, 1);
+  assert.equal(typeof response, "object");
+  assert.equal((response as { embeds: unknown[] }).embeds.length, 1);
+  assert.equal((response as { components: unknown[] }).components.length, 3);
+  assert.equal((response as { afterSend?: unknown }).afterSend, undefined);
+
+  const embed = (response as { embeds: [{ toJSON(): { title?: string; fields?: Array<{ name: string; value: string }> } }] }).embeds[0].toJSON();
+  assert.equal(embed.title, "Banjo Help");
+  assert.ok(embed.fields?.some((field) => field.name === "Banjo"));
+  assert.ok(embed.fields?.some((field) => field.name === "Hive"));
+  assert.ok(embed.fields?.some((field) => field.name === "Snarks"));
+  assert.ok(embed.fields?.some((field) => field.name === "🔗 Links"));
+  assert.doesNotMatch(JSON.stringify(embed), /placeholders are registered/);
+});
+
+test("help renders cached custom emoji mentions when available", async () => {
+  const commands = registry();
+  const response = await commands.get("help")?.execute({
+    ...context(commands),
+    message: {
+      client: {
+        commands,
+        emojis: {
+          cache: {
+            values: () => [
+              { name: "banjo", toString: () => "<:banjo:1111111111>" },
+              { name: "hivertinyji", toString: () => "<:hivertinyji:2222222222>" },
+              { name: "nicetry001", toString: () => "<:nicetry001:3333333333>" },
+            ][Symbol.iterator](),
+          },
+        },
+      },
+    } as unknown as Message,
+  }, []);
+
+  const embed = (response as { embeds: [{ toJSON(): { fields?: Array<{ name: string; value: string }> } }] }).embeds[0].toJSON();
+  assert.ok(embed.fields?.some((field) => field.name === "<:banjo:1111111111> Banjo"));
+  assert.ok(embed.fields?.some((field) => field.name === "<:hivertinyji:2222222222> Hive"));
+  assert.ok(embed.fields?.some((field) => field.name === "<:nicetry001:3333333333> Snarks"));
 });
 
 test("legacy static links keep their migrated URLs", async () => {
@@ -144,9 +177,12 @@ test("help for a selected alias resolves the canonical command", async () => {
   const commands = registry();
   const response = await commands.get("help")?.execute(context(commands), ["pancakes"]);
 
-  assert.equal(typeof response, "string");
-  assert.match(response as string, /\*\*\$pancake\*\*/);
-  assert.match(response as string, /Aliases: pancakes/);
+  assert.equal(typeof response, "object");
+
+  const embed = (response as { embeds: [{ toJSON(): { title?: string; description?: string; fields?: Array<{ name: string; value: string }> } }] }).embeds[0].toJSON();
+  assert.equal(embed.title, "Help: $pancake");
+  assert.equal(embed.description, "`$pancake`");
+  assert.ok(embed.fields?.some((field) => field.name === "Aliases" && field.value === "`$pancakes`"));
 });
 
 test("explicitly disabled legacy commands keep their legacy messages", async () => {
