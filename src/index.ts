@@ -14,6 +14,7 @@ import { registerCommands } from "./commands/index.js";
 import { UserFacingCommandError } from "./commands/hive.js";
 import { LlmChat } from "./llm/chat.js";
 import { logger } from "./logger.js";
+import { startDelayedTyping } from "./typing.js";
 
 const config = loadConfig();
 const llmChat = new LlmChat(config, logger);
@@ -52,6 +53,7 @@ client.on("messageCreate", async (message) => {
   const command = client.commands.get(parsed.name);
   if (!command) return;
 
+  const stopTyping = startDelayedTyping(message);
   try {
     const response = await command.execute({ message, config, logger, commandName: parsed.name }, parsed.args);
     if (response) {
@@ -74,6 +76,8 @@ client.on("messageCreate", async (message) => {
       error: error instanceof Error ? error.message : String(error),
     });
     await message.reply("Sorry, that command failed while Banjo is still being rebuilt.");
+  } finally {
+    stopTyping();
   }
 });
 
