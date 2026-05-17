@@ -1,6 +1,7 @@
 import {
   ChannelType,
   Client,
+  Events,
   GatewayIntentBits,
   Partials,
   type GuildTextBasedChannel,
@@ -9,6 +10,7 @@ import {
 import { parseCommand } from "./command-parser.js";
 import { loadConfig } from "./config.js";
 import { registerCommands } from "./commands/index.js";
+import { UserFacingCommandError } from "./commands/hive.js";
 import { LlmChat } from "./llm/chat.js";
 import { logger } from "./logger.js";
 
@@ -29,7 +31,7 @@ const client = new Client({
 
 registerCommands(client);
 
-client.once("ready", () => {
+client.once(Events.ClientReady, () => {
   logger.info("Banjo is ready.", {
     user: client.user?.tag,
     commands: client.commands.size,
@@ -55,6 +57,11 @@ client.on("messageCreate", async (message) => {
     const response = await command.execute({ message, config, logger, commandName: parsed.name }, parsed.args);
     if (response) await message.reply(response);
   } catch (error) {
+    if (error instanceof UserFacingCommandError) {
+      await message.reply(error.message);
+      return;
+    }
+
     logger.error("Command failed.", {
       command: parsed.name,
       error: error instanceof Error ? error.message : String(error),

@@ -17,9 +17,11 @@
   "dependencies": {
     "discord.js": "^14.19.3",
     "dotenv": "^16.4.7",
+    "mssql": "^12.5.4",
     "openai": "^4.104.0"
   },
   "devDependencies": {
+    "@types/mssql": "^12.3.0",
     "@types/node": "^22.15.18",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
