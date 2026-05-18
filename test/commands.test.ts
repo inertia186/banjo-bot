@@ -468,6 +468,14 @@ test("hive account commands use the injected Hive API", async () => {
         quote: "1.000 HIVE",
       },
     }),
+    getMarketTicker: async () => ({
+      latest: "0.062000",
+      lowest_ask: "0.064000",
+      highest_bid: "0.061000",
+      percent_change: "2.35",
+      hive_volume: "1000.000 HIVE",
+      hbd_volume: "62.000 HBD",
+    }),
     getFollowCount: async (account) => ({
       account,
       follower_count: 1234,
@@ -1384,27 +1392,103 @@ test("hive account commands use the injected Hive API", async () => {
     await commands.get("greed")?.execute(context(commands, "greed", { market }), ["wat"]),
     "Usage: `$fear [days-ago]`",
   );
+  const tokenDirectory = await commands.get("token")?.execute(context(commands, "token"), []);
+  assert.equal(typeof tokenDirectory, "object");
+  const tokenDirectoryEmbed = (tokenDirectory as { embeds: [{ toJSON(): { title?: string; description?: string; fields?: Array<{ name: string; value: string }>; footer?: { text: string } } }] }).embeds[0].toJSON();
+  assert.equal(tokenDirectoryEmbed.title, "Token Lookup");
+  assert.equal(tokenDirectoryEmbed.description, "Hive Engine market: [BEE](https://hive-engine.com/trade/BEE)");
+  assert.deepEqual(tokenDirectoryEmbed.fields, [
+    { name: "Native", value: "`HIVE` `HBD`", inline: false },
+    { name: "Wrapped", value: "`SWAP.HIVE` `SWAP.HBD` `SWAP.BTC` `SWAP.LTC`", inline: false },
+    { name: "Communities", value: "`LEO` `NEOXAG` `CENT` `POB`", inline: false },
+    { name: "Games", value: "`SPS` `DEC` `GLX` `SIM`", inline: false },
+    { name: "Hive Engine", value: "`BEE` `PIZZA` `WORKERBEE`", inline: false },
+  ]);
+  assert.equal(tokenDirectoryEmbed.footer?.text, "Use $token <symbol>");
+  const tokenResponse = await commands.get("token")?.execute(context(commands, "token", { hive, hiveEngine, market, scot }), ["leo"]);
+  assert.equal(typeof tokenResponse, "object");
+  const tokenEmbed = (tokenResponse as { embeds: [{ toJSON(): { title?: string; url?: string; description?: string; thumbnail?: { url: string }; footer?: { text: string; icon_url?: string }; fields?: Array<{ name: string; value: string; inline?: boolean }> } }] }).embeds[0].toJSON();
+  assert.equal(tokenEmbed.title, "`LEO` issued by `@leofinance`");
+  assert.equal(tokenEmbed.url, "https://hive-engine.com/?p=history&t=LEO&utm_source=banjo");
   assert.equal(
-    await commands.get("token")?.execute(context(commands, "token", { hiveEngine, market }), ["leo"]),
+    tokenEmbed.description,
     [
-      "**LEO** issued by **@leofinance**",
-      "https://hive-engine.com/?p=history&t=LEO&utm_source=banjo",
-      "Name: LEO",
       "A social token for finance-focused Hive communities.",
-      "See: https://leo.io",
-      "Circulating Supply: `1,234,568 LEO`",
-      "Last Price: `0.250 SWAP.HIVE / $0.015090`",
-      "Lowest Ask: `0.260 SWAP.HIVE`",
-      "Highest Bid: `0.240 SWAP.HIVE`",
-      "Volume: `123.456 SWAP.HIVE / $7.451804`",
-      "Change: `-1.25%`",
-      "Trade: https://hive-engine.com/?p=market&t=LEO&utm_source=banjo",
+      "See: [LEO](https://leo.io)",
+      "Trade [LEO](https://hive-engine.com/trade/LEO)",
+      "Also see: [LeoFinance](https://hive.blog/trending/hive-167922)",
     ].join("\n"),
+  );
+  assert.equal(tokenEmbed.thumbnail?.url, "https://hive-engine.com/images/hive_engine.png");
+  assert.equal(tokenEmbed.footer?.text, "Hive Engine");
+  assert.deepEqual(tokenEmbed.fields, [
+    { name: "Circulating Supply", value: "`1,234,568 LEO`", inline: true },
+    { name: "Last Price", value: "`0.250 SWAP.HIVE / $0.015090`", inline: true },
+    { name: "Lowest Ask", value: "`0.260 SWAP.HIVE`", inline: true },
+    { name: "Highest Bid", value: "`0.240 SWAP.HIVE`", inline: true },
+    { name: "Volume", value: "`123.456 SWAP.HIVE / $7.451804`", inline: true },
+    { name: "Change", value: "`-1.25%`", inline: true },
+  ]);
+  const nativeTokenResponse = await commands.get("token")?.execute(context(commands, "token", { hive, hiveEngine, market }), ["hive"]);
+  assert.equal(typeof nativeTokenResponse, "object");
+  const nativeTokenEmbed = (nativeTokenResponse as { embeds: [{ toJSON(): { title?: string; description?: string; thumbnail?: { url: string }; footer?: { text: string; icon_url?: string }; fields?: Array<{ name: string; value: string; inline?: boolean }> } }] }).embeds[0].toJSON();
+  assert.equal(nativeTokenEmbed.title, "`HIVE` native Hive asset");
+  assert.equal(
+    nativeTokenEmbed.description,
+    [
+      "Native governance and resource token for the Hive blockchain.",
+      "Trade [HIVE/HBD](https://wallet.hive.blog/market)",
+    ].join("\n"),
+  );
+  assert.equal(nativeTokenEmbed.thumbnail?.url, "https://assets.coingecko.com/coins/images/10840/standard/logo_transparent_4x.png");
+  assert.equal(nativeTokenEmbed.footer?.text, "Hive");
+  assert.equal(nativeTokenEmbed.footer?.icon_url, "https://assets.coingecko.com/coins/images/10840/standard/logo_transparent_4x.png");
+  assert.deepEqual(nativeTokenEmbed.fields, [
+    { name: "Current Supply", value: "`500,000.000 HIVE`", inline: true },
+    { name: "Last Price", value: "`0.062 HBD / HIVE`", inline: true },
+    { name: "Lowest Ask", value: "`0.064 HBD / HIVE`", inline: true },
+    { name: "Highest Bid", value: "`0.061 HBD / HIVE`", inline: true },
+    { name: "Volume", value: "`1,000.000 HIVE / 62.000 HBD`", inline: true },
+    { name: "Change", value: "`+2.35%`", inline: true },
+    { name: "Virtual Supply", value: "`600,000.000 HIVE`", inline: true },
+    { name: "Feed", value: "`0.0630 HBD / HIVE`", inline: true },
+  ]);
+  const nativeHbdResponse = await commands.get("token")?.execute(context(commands, "token", { hive, hiveEngine, market }), ["hbd"]);
+  assert.equal(typeof nativeHbdResponse, "object");
+  const nativeHbdEmbed = (nativeHbdResponse as { embeds: [{ toJSON(): { title?: string; description?: string; fields?: Array<{ name: string; value: string; inline?: boolean }> } }] }).embeds[0].toJSON();
+  assert.equal(nativeHbdEmbed.title, "`HBD` native Hive asset");
+  assert.equal(
+    nativeHbdEmbed.description,
+    [
+      "Hive-backed stable asset used for savings, payments, and the internal market.",
+      "Trade [HIVE/HBD](https://wallet.hive.blog/market)",
+    ].join("\n"),
+  );
+  assert.deepEqual(nativeHbdEmbed.fields, [
+    { name: "Current Supply", value: "`25,000.000 HBD`", inline: true },
+    { name: "Last Price", value: "`16.129 HIVE / HBD`", inline: true },
+    { name: "Lowest Ask", value: "`15.625 HIVE / HBD`", inline: true },
+    { name: "Highest Bid", value: "`16.393 HIVE / HBD`", inline: true },
+    { name: "Volume", value: "`1,000.000 HIVE / 62.000 HBD`", inline: true },
+    { name: "Change", value: "`+2.35%`", inline: true },
+    { name: "Interest Rate", value: "`12.00%`", inline: true },
+    { name: "Feed", value: "`0.0630 HBD / HIVE`", inline: true },
+  ]);
+  assert.equal(
+    await commands.get("token")?.execute(context(commands, "token", { hiveEngine, market }), ["btc"]),
+    "Did you mean: SWAP.BTC",
   );
   assert.equal(
     await commands.get("token")?.execute(context(commands, "token", { hiveEngine, market }), ["wat"]),
-    "Unknown token: WAT",
+    "Unknown token: WAT. Try `$token` for examples or `SWAP.WAT` if it is a wrapped asset.",
   );
+  const mixedTokenResponse = await commands.get("token")?.execute(context(commands, "token", { hive, hiveEngine, market }), ["hive", "wat", "btc"]);
+  assert.equal(typeof mixedTokenResponse, "object");
+  assert.equal((mixedTokenResponse as { content?: string }).content, [
+    "Unknown token: WAT. Try `$token` for examples or `SWAP.WAT` if it is a wrapped asset.",
+    "Did you mean: SWAP.BTC",
+  ].join("\n"));
+  assert.equal((mixedTokenResponse as { embeds: unknown[] }).embeds.length, 1);
   assert.equal(
     await commands.get("richlist")?.execute(context(commands, "richlist", { hiveEngine }), ["leo", "3"]),
     [
@@ -1589,6 +1673,7 @@ test("rep reports unknown accounts when the reputation page does not exactly mat
         quote: "0.000 HIVE",
       },
     }),
+    getMarketTicker: async () => ({}),
     getFollowCount: async () => null,
     getFirstPost: async () => null,
     getLatestPosts: async () => [],

@@ -1,10 +1,14 @@
-import { HiveRpcClient, type HiveAccount, type HiveAccountOperation, type HiveApi, type HiveCommunity, type HivePost, type HiveProposal, type HiveRewardOperation, type HiveWitness } from "../hive/api.js";
+import { EmbedBuilder } from "discord.js";
+import { HiveRpcClient, type HiveAccount, type HiveAccountOperation, type HiveApi, type HiveCommunity, type HiveDynamicGlobalProperties, type HiveFeedHistory, type HiveMarketTicker, type HivePost, type HiveProposal, type HiveRewardOperation, type HiveWitness } from "../hive/api.js";
 import { HiveEngineRpcClient, type HiveEngineApi, type HiveEngineBalance, type HiveEngineBuyOrder, type HiveEngineMarketMetrics, type HiveEngineNft, type HiveEngineToken, type HiveEngineTrade, type NftShowroomArt } from "../hive-engine/api.js";
 import { ScotHttpClient, type ScotAccountHistoryEntry, type ScotApi, type ScotConfigEntry, type ScotDiscussion } from "../hive-engine/scot.js";
 import { HiveDeveloperNodeDirectory, type HiveNode, type HiveNodeDirectory } from "../hive/nodes.js";
 import { HiveSqlClient, type HiveSqlApi, type HiveSqlAppPayout, type HiveSqlBadge, type HiveSqlBadgeStats, type HiveSqlDistributionBucket, type HiveSqlDistributionSummary, type HiveSqlPromotedSummary, type HiveSqlSearchComment, type HiveSqlSearchOptions, type HiveSqlSearchResult, type HiveSqlTopKind, type HiveSqlTopPost, type HiveSqlTopPostOptions } from "../hivesql/api.js";
 import { CoinGeckoMarketClient, type FearGreedIndex, type MarketApi, type MarketTicker } from "../market/api.js";
 import type { Command, CommandContext } from "./types.js";
+
+const HIVE_TOKEN_ICON_URL = "https://assets.coingecko.com/coins/images/10840/standard/logo_transparent_4x.png";
+const WRAPPED_TOKEN_SYMBOLS = new Set(["STEEM", "SBD", "BTC", "LTC"]);
 
 export const hiveCommands: Command[] = [
   {
@@ -698,26 +702,54 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const symbols = unique(args.map(normalizeTokenSymbol).filter(Boolean));
-      if (symbols.length === 0) return "Token symbol required.";
+      if (symbols.length === 0) return formatTokenDirectory();
       if (symbols.length > 3) return "Requesting more than 3 tokens is not supported in this Banjo build.";
 
       const hiveEngine = hiveEngineApi(context);
       const market = marketApi(context);
-      const hiveUsdPrice = await market.getHiveUsdPrice();
-      const results: string[] = [];
+      let hiveUsdPrice: number | null | undefined;
+      let scotConfig: ScotConfigEntry[] | null | undefined;
+      const embeds: EmbedBuilder[] = [];
+      const notes: string[] = [];
 
       for (const symbol of symbols) {
+        const wrappedSuggestion = wrappedTokenSuggestion(symbol);
+        if (wrappedSuggestion) {
+          notes.push(wrappedSuggestion);
+          continue;
+        }
+
+        if (isNativeHiveToken(symbol)) {
+          const [globals, feedHistory, ticker] = await Promise.all([
+            hiveApi(context).getDynamicGlobalProperties(),
+            hiveApi(context).getFeedHistory(),
+            hiveApi(context).getMarketTicker(),
+          ]);
+          embeds.push(formatNativeHiveToken(symbol, globals, feedHistory, ticker));
+          continue;
+        }
+
+        hiveUsdPrice ??= await market.getHiveUsdPrice();
+
         const [token, trade, metrics] = await Promise.all([
           hiveEngine.getToken(symbol),
           hiveEngine.getLatestTrade(symbol),
           hiveEngine.getMarketMetrics(symbol),
         ]);
-        if (!token) return `Unknown token: ${symbol}`;
+        if (!token) {
+          notes.push(formatUnknownToken(symbol));
+          continue;
+        }
 
-        results.push(formatHiveEngineToken(token, trade, metrics, hiveUsdPrice));
+        scotConfig ??= await loadOptionalScotConfig(context);
+        const scotHint = scotConfig ? await formatScotTokenHint(context, scotConfig, token.symbol) : null;
+
+        embeds.push(formatHiveEngineToken(token, trade, metrics, hiveUsdPrice, scotHint));
       }
 
-      return results.join("\n\n");
+      if (embeds.length === 0 && notes.length > 0) return notes.join("\n");
+      if (notes.length > 0) return { content: notes.join("\n"), embeds };
+      return { embeds };
     },
   },
   {
@@ -1481,6 +1513,25 @@ function normalizeTokenSymbol(value: string): string {
   return value.replace(/^\$/, "").toUpperCase().trim();
 }
 
+function isNativeHiveToken(symbol: string): symbol is "HIVE" | "HBD" {
+  return symbol === "HIVE" || symbol === "HBD";
+}
+
+function wrappedTokenSuggestion(symbol: string): string | null {
+  return WRAPPED_TOKEN_SYMBOLS.has(symbol) ? `Did you mean: SWAP.${symbol}` : null;
+}
+
+async function loadOptionalScotConfig(context: CommandContext): Promise<ScotConfigEntry[] | null> {
+  try {
+    return await scotApi(context).getConfig();
+  } catch (error) {
+    context.logger.warn("Unable to load SCOT token hints.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 function readRichlistCount(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) ? Math.min(25, Math.max(1, parsed)) : 13;
@@ -1556,26 +1607,202 @@ function parseHiveEngineNumber(value: string | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function formatTokenDirectory(): { embeds: EmbedBuilder[] } {
+  const embed = new EmbedBuilder()
+    .setTitle("Token Lookup")
+    .setDescription("Hive Engine market: [BEE](https://hive-engine.com/trade/BEE)")
+    .addFields(
+      {
+        name: "Native",
+        value: "`HIVE` `HBD`",
+        inline: false,
+      },
+      {
+        name: "Wrapped",
+        value: "`SWAP.HIVE` `SWAP.HBD` `SWAP.BTC` `SWAP.LTC`",
+        inline: false,
+      },
+      {
+        name: "Communities",
+        value: "`LEO` `NEOXAG` `CENT` `POB`",
+        inline: false,
+      },
+      {
+        name: "Games",
+        value: "`SPS` `DEC` `GLX` `SIM`",
+        inline: false,
+      },
+      {
+        name: "Hive Engine",
+        value: "`BEE` `PIZZA` `WORKERBEE`",
+        inline: false,
+      },
+    )
+    .setFooter({
+      text: "Use $token <symbol>",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
+
+  return { embeds: [embed] };
+}
+
+function formatNativeHiveToken(
+  symbol: "HIVE" | "HBD",
+  globals: HiveDynamicGlobalProperties,
+  feedHistory: HiveFeedHistory,
+  ticker: HiveMarketTicker,
+): EmbedBuilder {
+  const feedPrice = parseFeedPrice(feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+  const latest = parseHiveEngineNumber(ticker.latest);
+  const highestBid = parseHiveEngineNumber(ticker.highest_bid);
+  const lowestAsk = parseHiveEngineNumber(ticker.lowest_ask);
+  const percentChange = Number.parseFloat(ticker.percent_change ?? "");
+  const supply = symbol === "HIVE" ? globals.current_supply : globals.current_hbd_supply;
+  const embed = new EmbedBuilder()
+    .setTitle(`\`${symbol}\` native Hive asset`)
+    .setURL("https://hive.io/")
+    .setDescription([
+      nativeHiveTokenDescription(symbol),
+      "Trade [HIVE/HBD](https://wallet.hive.blog/market)",
+    ].join("\n"))
+    .setThumbnail(HIVE_TOKEN_ICON_URL)
+    .setFooter({ text: "Hive", iconURL: HIVE_TOKEN_ICON_URL });
+
+  if (supply) {
+    embed.addFields({
+      name: "Current Supply",
+      value: `\`${formatAsset(supply, 3)}\``,
+      inline: true,
+    });
+  }
+
+  if (latest > 0) {
+    embed.addFields({
+      name: "Last Price",
+      value: `\`${formatNativeHiveMarketPrice(symbol, latest)}\``,
+      inline: true,
+    });
+  }
+
+  if (lowestAsk > 0) {
+    embed.addFields({
+      name: "Lowest Ask",
+      value: `\`${formatNativeHiveMarketPrice(symbol, lowestAsk)}\``,
+      inline: true,
+    });
+  }
+
+  if (highestBid > 0) {
+    embed.addFields({
+      name: "Highest Bid",
+      value: `\`${formatNativeHiveMarketPrice(symbol, highestBid)}\``,
+      inline: true,
+    });
+  }
+
+  const volume = formatNativeHiveVolume(ticker);
+  if (volume) {
+    embed.addFields({
+      name: "Volume",
+      value: `\`${volume}\``,
+      inline: true,
+    });
+  }
+
+  if (Number.isFinite(percentChange)) {
+    embed.addFields({
+      name: "Change",
+      value: `\`${formatSignedPercent(percentChange)}\``,
+      inline: true,
+    });
+  }
+
+  if (symbol === "HIVE" && globals.virtual_supply) {
+    embed.addFields({
+      name: "Virtual Supply",
+      value: `\`${formatAsset(globals.virtual_supply, 3)}\``,
+      inline: true,
+    });
+  }
+
+  if (symbol === "HBD" && typeof globals.hbd_interest_rate === "number") {
+    embed.addFields({
+      name: "Interest Rate",
+      value: `\`${formatNumber(globals.hbd_interest_rate / 100, 2)}%\``,
+      inline: true,
+    });
+  }
+
+  if (feedPrice !== null) {
+    embed.addFields({
+      name: "Feed",
+      value: `\`${formatNumber(feedPrice, 4)} HBD / HIVE\``,
+      inline: true,
+    });
+  }
+
+  return embed;
+}
+
+function formatNativeHiveMarketPrice(symbol: "HIVE" | "HBD", hbdPerHive: number): string {
+  if (symbol === "HBD") return `${formatNumber(1 / hbdPerHive, 3)} HIVE / HBD`;
+  return `${formatNumber(hbdPerHive, 3)} HBD / HIVE`;
+}
+
+function formatNativeHiveVolume(ticker: HiveMarketTicker): string | null {
+  const hiveVolume = ticker.hive_volume ? formatAsset(ticker.hive_volume, 3) : null;
+  const hbdVolume = ticker.hbd_volume ? formatAsset(ticker.hbd_volume, 3) : null;
+  return [hiveVolume, hbdVolume].filter(Boolean).join(" / ") || null;
+}
+
+function nativeHiveTokenDescription(symbol: "HIVE" | "HBD"): string {
+  if (symbol === "HBD") {
+    return "Hive-backed stable asset used for savings, payments, and the internal market.";
+  }
+
+  return "Native governance and resource token for the Hive blockchain.";
+}
+
 function formatHiveEngineToken(
   token: HiveEngineToken,
   trade: HiveEngineTrade | null,
   metrics: HiveEngineMarketMetrics | null,
   hiveUsdPrice: number | null,
-): string {
+  scotHint: string | null,
+): EmbedBuilder {
   const metadata = parseTokenMetadata(token.metadata);
-  const lines = [
-    `**${token.symbol}** issued by **@${token.issuer ?? "unknown"}**`,
-    `https://hive-engine.com/?p=history&t=${encodeURIComponent(token.symbol)}&utm_source=banjo`,
-    token.name ? `Name: ${token.name}` : null,
-    metadata.desc ? truncateText(metadata.desc, 240) : null,
-    metadata.url ? `See: ${normalizeMetadataUrl(metadata.url)}` : null,
-    token.circulatingSupply ? `Circulating Supply: \`${formatNumber(Number.parseFloat(token.circulatingSupply), 0)} ${token.symbol}\`` : null,
-    trade ? formatTokenTrade(trade, hiveUsdPrice) : null,
-    metrics ? formatTokenMetrics(metrics, hiveUsdPrice) : null,
-    `Trade: https://hive-engine.com/?p=market&t=${encodeURIComponent(token.symbol)}&utm_source=banjo`,
-  ];
+  const marketUrl = hiveEngineMarketUrl(token.symbol);
+  const description = [
+    metadata.desc ? truncateText(metadata.desc, 600) : null,
+    metadata.url ? `See: [${token.name ?? token.symbol}](${normalizeMetadataUrl(metadata.url)})` : null,
+    `Trade [${token.symbol}](${marketUrl})`,
+    scotHint,
+  ].filter(Boolean).join("\n");
+  const embed = new EmbedBuilder()
+    .setTitle(`\`${token.symbol}\` issued by \`@${token.issuer ?? "unknown"}\``)
+    .setURL(hiveEngineTokenUrl(token.symbol))
+    .setDescription(description)
+    .setThumbnail(normalizeTokenIconUrl(token.symbol, metadata.icon))
+    .setFooter({
+      text: "Hive Engine",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
 
-  return lines.filter(Boolean).join("\n");
+  const supply = Number.parseFloat(token.circulatingSupply ?? "");
+  if (Number.isFinite(supply)) {
+    embed.addFields({
+      name: "Circulating Supply",
+      value: `\`${formatNumber(supply, 0)} ${token.symbol}\``,
+      inline: true,
+    });
+  }
+
+  const tradeField = trade ? formatTokenTradeField(trade, hiveUsdPrice) : null;
+  if (tradeField) embed.addFields(tradeField);
+
+  if (metrics) embed.addFields(formatTokenMetricFields(metrics, hiveUsdPrice));
+
+  return embed;
 }
 
 function formatHiveEngineNft(nft: HiveEngineNft): string {
@@ -1642,6 +1869,31 @@ function formatScotConfigEntry(entry: ScotConfigEntry): string | null {
   if (metadataKey === "app") {
     return `${token} (app only): ${metadataValue || "none"}`;
   }
+
+  return null;
+}
+
+async function formatScotTokenHint(context: CommandContext, config: ScotConfigEntry[], symbol: string): Promise<string | null> {
+  const entry = config.find((item) => item.token.toUpperCase() === symbol.toUpperCase());
+  if (!entry) return null;
+
+  const community = entry.hive_community?.trim();
+  if (community) {
+    let label = community;
+    try {
+      label = (await hiveApi(context).getCommunity(community))?.title ?? community;
+    } catch (error) {
+      context.logger.warn("Unable to resolve SCOT community name.", {
+        community,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    return `Also see: [${label}](https://hive.blog/trending/${encodeURIComponent(community)})`;
+  }
+
+  const metadataValue = entry.json_metadata_value?.trim();
+  if (entry.json_metadata_key === "app" && metadataValue) return `Also see app: \`${metadataValue}\``;
 
   return null;
 }
@@ -2033,29 +2285,45 @@ function calculateTt2xYield(sumPendingPayout: number, buyBook: HiveEngineBuyOrde
   return { hive, priceAtDepth };
 }
 
-function formatTokenTrade(trade: HiveEngineTrade, hiveUsdPrice: number | null): string | null {
+function formatTokenTradeField(
+  trade: HiveEngineTrade,
+  hiveUsdPrice: number | null,
+): { name: string; value: string; inline: true } | null {
   const price = Number.parseFloat(trade.price ?? "");
   if (!Number.isFinite(price)) return null;
 
   const usd = hiveUsdPrice === null ? null : price * hiveUsdPrice;
   const age = typeof trade.timestamp === "number" ? ` (${formatRelativeTime(new Date(trade.timestamp * 1000))})` : "";
-  return `Last Price: \`${formatNumber(price, 3)} SWAP.HIVE${usd === null ? "" : ` / $${formatNumber(usd, 6)}`}\`${age}`;
+  return {
+    name: "Last Price",
+    value: `\`${formatNumber(price, 3)} SWAP.HIVE${usd === null ? "" : ` / $${formatNumber(usd, 6)}`}\`${age}`,
+    inline: true,
+  };
 }
 
-function formatTokenMetrics(metrics: HiveEngineMarketMetrics, hiveUsdPrice: number | null): string {
+function formatTokenMetricFields(
+  metrics: HiveEngineMarketMetrics,
+  hiveUsdPrice: number | null,
+): Array<{ name: string; value: string; inline: true }> {
   const ask = Number.parseFloat(metrics.lowestAsk ?? "");
   const bid = Number.parseFloat(metrics.highestBid ?? "");
   const volume = Number.parseFloat(metrics.volume ?? "");
   const change = Number.parseFloat(metrics.priceChangePercent ?? "");
   return [
-    Number.isFinite(ask) ? `Lowest Ask: \`${formatNumber(ask, 3)} SWAP.HIVE\`` : null,
-    Number.isFinite(bid) ? `Highest Bid: \`${formatNumber(bid, 3)} SWAP.HIVE\`` : null,
-    Number.isFinite(volume) ? `Volume: \`${formatNumber(volume, 3)} SWAP.HIVE${hiveUsdPrice === null ? "" : ` / $${formatNumber(volume * hiveUsdPrice, 6)}`}\`` : null,
-    Number.isFinite(change) ? `Change: \`${formatSignedPercent(change)}\`` : null,
-  ].filter(Boolean).join("\n");
+    Number.isFinite(ask) ? { name: "Lowest Ask", value: `\`${formatNumber(ask, 3)} SWAP.HIVE\``, inline: true } : null,
+    Number.isFinite(bid) ? { name: "Highest Bid", value: `\`${formatNumber(bid, 3)} SWAP.HIVE\``, inline: true } : null,
+    Number.isFinite(volume)
+      ? {
+          name: "Volume",
+          value: `\`${formatNumber(volume, 3)} SWAP.HIVE${hiveUsdPrice === null ? "" : ` / $${formatNumber(volume * hiveUsdPrice, 6)}`}\``,
+          inline: true,
+        }
+      : null,
+    Number.isFinite(change) ? { name: "Change", value: `\`${formatSignedPercent(change)}\``, inline: true } : null,
+  ].filter((field): field is { name: string; value: string; inline: true } => field !== null);
 }
 
-function parseTokenMetadata(value: string | undefined): { desc?: string; url?: string } {
+function parseTokenMetadata(value: string | undefined): { desc?: string; url?: string; icon?: string } {
   if (!value) return {};
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -2064,6 +2332,7 @@ function parseTokenMetadata(value: string | undefined): { desc?: string; url?: s
     return {
       ...(typeof record.desc === "string" && record.desc ? { desc: record.desc } : {}),
       ...(typeof record.url === "string" && record.url ? { url: record.url } : {}),
+      ...(typeof record.icon === "string" && record.icon ? { icon: record.icon } : {}),
     };
   } catch {
     return {};
@@ -2072,6 +2341,48 @@ function parseTokenMetadata(value: string | undefined): { desc?: string; url?: s
 
 function normalizeMetadataUrl(value: string): string {
   return /^https?:\/\//i.test(value) ? value : `https://${value}`;
+}
+
+function normalizeTokenIconUrl(symbol: string, value: string | undefined): string {
+  const fallback = "https://hive-engine.com/images/hive_engine.png";
+  const icon = value?.trim() || fallback;
+  const normalized = normalizeTokenImageUrl(icon)
+    .replace(/^https:\/\/steemitimages\.com\/640x0\//i, "")
+    .replace(/^https:\/\/hive\.blog\/640x0\//i, "")
+    .replace(/^https:\/\/media\.giphy\.com\/media\/(.+)\/giphy\.gif$/i, "https://giphy.com/gifs/$1");
+
+  if (normalized.toLowerCase().endsWith(".svg")) {
+    return symbol === "APX" ? "https://i.imgur.com/hubmE9i.png" : fallback;
+  }
+
+  try {
+    const url = new URL(normalized);
+    return url.protocol === "http:" || url.protocol === "https:" ? normalized : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeTokenImageUrl(value: string): string {
+  if (value.startsWith("ipfs://ipfs/")) return `https://ipfs.io/ipfs/${value.slice("ipfs://ipfs/".length)}`;
+  if (value.startsWith("ipfs://")) return `https://ipfs.io/ipfs/${value.slice("ipfs://".length)}`;
+  if (value.match(/^Qm[1-9A-HJ-NP-Za-km-z]{44}/)) return `https://ipfs.io/ipfs/${value}`;
+  return normalizeMetadataUrl(value);
+}
+
+function hiveEngineTokenUrl(symbol: string): string {
+  return `https://hive-engine.com/?p=history&t=${encodeURIComponent(symbol)}&utm_source=banjo`;
+}
+
+function hiveEngineMarketUrl(symbol: string): string {
+  return `https://hive-engine.com/trade/${encodeURIComponent(symbol)}`;
+}
+
+function formatUnknownToken(symbol: string): string {
+  const hint = symbol.startsWith("SWAP.")
+    ? "Try `$token` for examples."
+    : `Try \`$token\` for examples or \`SWAP.${symbol}\` if it is a wrapped asset.`;
+  return `Unknown token: ${symbol}. ${hint}`;
 }
 
 function formatApproval(

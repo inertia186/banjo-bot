@@ -58,6 +58,15 @@ export type HiveFeedHistory = {
   };
 };
 
+export type HiveMarketTicker = {
+  latest?: string;
+  lowest_ask?: string;
+  highest_bid?: string;
+  percent_change?: string;
+  hive_volume?: string;
+  hbd_volume?: string;
+};
+
 export type HiveFollowCount = {
   account: string;
   follower_count: number;
@@ -174,6 +183,7 @@ export type HiveApi = {
   getConfig(): Promise<HiveConfig>;
   getDynamicGlobalProperties(): Promise<HiveDynamicGlobalProperties>;
   getFeedHistory(): Promise<HiveFeedHistory>;
+  getMarketTicker(): Promise<HiveMarketTicker>;
   getFollowCount(name: string): Promise<HiveFollowCount | null>;
   getFirstPost(name: string, offset: number): Promise<HivePost | null>;
   getLatestPosts(name: string, limit: number): Promise<HivePost[]>;
@@ -283,6 +293,10 @@ export class HiveRpcClient implements HiveApi {
 
   async getFeedHistory(): Promise<HiveFeedHistory> {
     return this.call<HiveFeedHistory>("condenser_api.get_feed_history", []);
+  }
+
+  async getMarketTicker(): Promise<HiveMarketTicker> {
+    return this.call<HiveMarketTicker>("condenser_api.get_ticker", []);
   }
 
   async getFollowCount(name: string): Promise<HiveFollowCount | null> {

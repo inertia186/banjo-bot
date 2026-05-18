@@ -260,7 +260,9 @@ The Ruby command rendered WorldCoinIndex widgets for arbitrary symbols. The Type
 
 ### `$token`
 
-Uses the Hive Engine contracts JSON-RPC endpoint, defaulting to `https://api.hive-engine.com/rpc/contracts`. The port queries `tokens.tokens`, `market.tradesHistory`, and `market.metrics`. Unlike the Ruby command, it does not fall back to Steem Engine when Hive Engine does not know the token.
+Uses the Hive Engine contracts JSON-RPC endpoint, defaulting to `https://api.hive-engine.com/rpc/contracts`. The port queries `tokens.tokens`, `market.tradesHistory`, and `market.metrics`. Unlike the Ruby command, it does not fall back to Steem Engine because Steem Engine is no longer a live backend for this bot. Legacy chain symbols such as `STEEM`, `SBD`, `BTC`, and `LTC` point users toward their `SWAP.*` Hive Engine wrappers.
+
+Native `HIVE` and `HBD` are handled separately through Hive RPC: `condenser_api.get_ticker`, `condenser_api.get_feed_history`, and `condenser_api.get_dynamic_global_properties`. `$token` with no arguments returns a small directory of native tokens, common wrappers, and sample Hive Engine tokens. When SCOT config is already available in command context, token embeds can add a community/app hint.
 
 For any command implemented through Hive Engine, explicitly verify whether the Ruby behavior also handled native Hive assets separately. `SWAP.HIVE` on Hive Engine is not native `HIVE`; wrapped-token balances, richlists, prices, and stake are separate from base-chain HIVE/HBD/VESTS state. If both cases exist, keep them as separate branches and label the output/link destinations clearly.
 
