@@ -13,23 +13,43 @@ import { handleHelpInteraction } from "./commands/core.js";
 import { registerCommands } from "./commands/index.js";
 import { handleNftShowroomInteraction, handleProposalInteraction, handleSearchInteraction, UserFacingCommandError } from "./commands/hive.js";
 import { LlmChat } from "./llm/chat.js";
+import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "./llm/channel-context.js";
+import { LlmConversationLeases } from "./llm/conversation-lease.js";
+import { HiveAmbientContextProvider } from "./llm/hive-context.js";
+import { llmPrompt } from "./llm/prompt.js";
+import { hasInterveningHumanActivity, TypingActivityTracker } from "./llm/turn-taking.js";
 import { logger } from "./logger.js";
+import { PassiveSnarks } from "./passive-snarks.js";
 import { startDelayedTyping } from "./typing.js";
 
 const config = loadConfig();
-const llmChat = new LlmChat(config, logger);
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageTyping,
     GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessageTyping,
     GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel, Partials.Message],
 });
 
 registerCommands(client);
+const llmChat = new LlmChat(
+  config,
+  logger,
+  undefined,
+  client.commands,
+  new CompositeAmbientContextProvider([
+    new HiveAmbientContextProvider(config, logger),
+    new ChannelAmbientContextProvider(logger),
+  ]),
+);
+const passiveSnarks = new PassiveSnarks();
+const conversationLeases = new LlmConversationLeases();
+const typingActivity = new TypingActivityTracker();
 
 client.once(Events.ClientReady, () => {
   logger.info("Banjo is ready.", {
@@ -43,6 +63,21 @@ client.once(Events.ClientReady, () => {
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   if (!isAllowedChannel(message)) return;
+
+  const passiveResponse = passiveSnarks.replyFor(message.content);
+  if (passiveResponse) {
+    if (passiveResponse.kind === "reply") {
+      await message.reply(passiveResponse.content);
+    } else if (passiveResponse.kind === "spongebob") {
+      await replyWithSpongebob(message);
+    } else if (llmChat.enabled) {
+      const response = await llmChat.replyTo(message, passiveResponse.prompt);
+      if (response && !await hasInterveningHumanActivity(message, typingActivity)) {
+        await message.reply(response);
+      }
+    }
+    return;
+  }
 
   const parsed = parseCommand(message.content, config.commandPrefix);
   if (!parsed) {
@@ -81,6 +116,10 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+client.on(Events.TypingStart, (typing) => {
+  typingActivity.noteTyping(typing);
+});
+
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
 
@@ -117,7 +156,7 @@ function isAllowedChannel(message: Message): boolean {
 async function maybeReplyWithLlm(message: Message) {
   if (!llmChat.enabled) return;
 
-  const prompt = llmPrompt(message);
+  const prompt = llmPrompt(message, config.commandPrefix, conversationLeases);
   if (!prompt) return;
 
   if ("sendTyping" in message.channel) {
@@ -125,22 +164,24 @@ async function maybeReplyWithLlm(message: Message) {
   }
 
   const response = await llmChat.replyTo(message, prompt);
-  if (response) await message.reply(response);
+  if (response && !await hasInterveningHumanActivity(message, typingActivity)) {
+    await message.reply(response);
+    conversationLeases.noteBotReply(message);
+  } else {
+    conversationLeases.closeForMessage(message);
+  }
 }
 
-function llmPrompt(message: Message): string | null {
-  if (message.channel.type === ChannelType.DM) {
-    return message.content.trim();
-  }
+async function replyWithSpongebob(message: Message) {
+  const reply = await message.reply("**Sponge**");
+  await sleep(250);
+  await reply.edit("**Spongebob**");
+  await sleep(250);
+  await reply.edit("**Spongebob Square**");
+  await sleep(250);
+  await reply.edit("**Spongebob Squarepants!**");
+}
 
-  const botUser = message.client.user;
-  if (!botUser || !message.mentions.has(botUser)) return null;
-
-  const mentionPatterns = [`<@${botUser.id}>`, `<@!${botUser.id}>`];
-  const prompt = mentionPatterns.reduce(
-    (content, mention) => content.replaceAll(mention, ""),
-    message.content,
-  ).trim();
-
-  return prompt || null;
+async function sleep(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

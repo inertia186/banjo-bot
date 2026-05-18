@@ -27,6 +27,8 @@ type HiveAccountReputationResponse = {
 };
 
 export type HiveDynamicGlobalProperties = {
+  head_block_number?: number;
+  time?: string;
   current_hbd_supply?: string;
   current_supply?: string;
   hbd_interest_rate?: number;
@@ -115,6 +117,11 @@ export type HivePost = {
   created?: string;
   cashout_time?: string;
   pending_payout_value?: string;
+  total_payout_value?: string;
+  net_votes?: number;
+  children?: number;
+  category?: string;
+  community?: string;
 };
 
 export type HiveConfig = {
@@ -189,6 +196,7 @@ export type HiveApi = {
   getFollowCount(name: string): Promise<HiveFollowCount | null>;
   getFirstPost(name: string, offset: number): Promise<HivePost | null>;
   getLatestPosts(name: string, limit: number): Promise<HivePost[]>;
+  getRankedPosts(sort: "created" | "trending" | "hot" | "payout", limit: number, tag?: string): Promise<HivePost[]>;
   getPostCreation(author: string, permlink: string): Promise<HivePost | null>;
   getCommunity(nameOrQuery: string): Promise<HiveCommunity | null>;
   getLatestAccountOperation(name: string): Promise<HiveAccountOperation | null>;
@@ -451,6 +459,15 @@ export class HiveRpcClient implements HiveApi {
     return this.call<HivePost[]>("bridge.get_account_posts", {
       sort: "posts",
       account: name,
+      limit,
+    });
+  }
+
+  async getRankedPosts(sort: "created" | "trending" | "hot" | "payout", limit: number, tag = ""): Promise<HivePost[]> {
+    return this.call<HivePost[]>("bridge.get_ranked_posts", {
+      sort,
+      tag,
+      observer: "banjo",
       limit,
     });
   }

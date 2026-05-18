@@ -49,7 +49,7 @@ export const coreCommands: Command[] = [
     description: "Show Banjo's running version.",
     usage: "version",
     category: "core",
-    execute: () => `banjo-bot v${packageJson.version}`,
+    execute: ({ config }) => `banjo-bot v${packageJson.version} (LLM: ${config.llm.model})`,
   },
   {
     name: "slap",

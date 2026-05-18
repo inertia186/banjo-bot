@@ -230,10 +230,10 @@ test("explicitly disabled legacy commands keep their legacy messages", async () 
   assert.equal(await commands.get("bidbots")?.execute(context(commands), ["palnet"]), "Bidbot report is not available.");
 });
 
-test("version reports Banjo's package version", async () => {
+test("version reports Banjo's package version and LLM model", async () => {
   const commands = registry();
 
-  assert.equal(await commands.get("version")?.execute(context(commands), []), `banjo-bot v${packageJson.version}`);
+  assert.equal(await commands.get("version")?.execute(context(commands), []), `banjo-bot v${packageJson.version} (LLM: test-model)`);
 });
 
 test("birthday reports tracked legacy birthdays", async () => {
@@ -517,6 +517,7 @@ test("hive account commands use the injected Hive API", async () => {
         { author, permlink: "newest-post", url: `/hive-100000/@${author}/newest-post` },
         { author, permlink: "older-post", url: `/@${author}/older-post` },
       ].slice(0, limit),
+    getRankedPosts: async () => [],
     getPostCreation: async (author, permlink) =>
       author === "dev-account" && permlink === "developer-tools"
         ? {
@@ -2234,6 +2235,7 @@ test("rep reports unknown accounts when the reputation page does not exactly mat
     getFollowCount: async () => null,
     getFirstPost: async () => null,
     getLatestPosts: async () => [],
+    getRankedPosts: async () => [],
     getPostCreation: async () => null,
     getCommunity: async () => null,
     getLatestAccountOperation: async () => null,
