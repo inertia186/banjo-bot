@@ -1021,7 +1021,8 @@ function hiveApi(context: CommandContext): HiveApi {
 }
 
 function formatAccountOperation(operation: HiveAccountOperation): string {
-  return `\`\`\`json\n${JSON.stringify({ [operation.type]: operation.value })}\n\`\`\``;
+  const json = JSON.stringify({ [operation.type]: operation.value }).replace(/`/g, "\\u0060");
+  return `\`\`\`json\n${json}\n\`\`\``;
 }
 
 function hiveNodeDirectory(context: CommandContext): HiveNodeDirectory {

@@ -1103,6 +1103,25 @@ test("hive account commands use the injected Hive API", async () => {
     await commands.get("poke")?.execute(context(commands, "poke", { hive }), ["alice"]),
     "```json\n{\"transfer\":{\"from\":\"alice\",\"to\":\"bob\",\"amount\":\"1.000 HIVE\",\"memo\":\"poke\"}}\n```",
   );
+  const maliciousHive: HiveApi = {
+    ...hive,
+    getLatestAccountOperation: async (name) => ({
+      index: 124,
+      block: 457,
+      timestamp: "2026-05-17T00:00:01",
+      type: "transfer",
+      value: {
+        from: name,
+        to: "bob",
+        amount: "1.000 HIVE",
+        memo: "```\n@everyone",
+      },
+    }),
+  };
+  assert.equal(
+    await commands.get("poke")?.execute(context(commands, "poke", { hive: maliciousHive }), ["alice"]),
+    "```json\n{\"transfer\":{\"from\":\"alice\",\"to\":\"bob\",\"amount\":\"1.000 HIVE\",\"memo\":\"\\u0060\\u0060\\u0060\\n@everyone\"}}\n```",
+  );
   const proxiedApprovalEmbed = embedJson<{
     title?: string;
     url?: string;
