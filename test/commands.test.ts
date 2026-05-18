@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import test from "node:test";
 import type { Client, Message } from "discord.js";
 import { registerCommands } from "../src/commands/index.js";
@@ -14,6 +15,9 @@ import type { HiveSqlApi } from "../src/hivesql/api.js";
 import type { Logger } from "../src/logger.js";
 import type { MarketApi } from "../src/market/api.js";
 import type { GiphyApi } from "../src/media/giphy.js";
+
+const require = createRequire(import.meta.url);
+const packageJson = require("../package.json") as { version: string };
 
 const logger: Logger = {
   info: () => undefined,
@@ -209,7 +213,6 @@ test("explicitly disabled legacy commands keep their legacy messages", async () 
   assert.equal(await commands.get("register")?.execute(context(commands), ["alice"]), "Registration is currently disabled.");
   assert.equal(await commands.get("upvote")?.execute(context(commands), []), "Upvote is currently disabled.");
   assert.equal(await commands.get("verify")?.execute(context(commands), ["alice"]), "Account verification is not available.");
-  assert.equal(await commands.get("version")?.execute(context(commands), []), "Cosgrove version lookup is not available in this Banjo build.");
   assert.equal(await commands.get("slap")?.execute(context(commands), ["alice"]), "Slap command is not available.");
   assert.equal(await commands.get("catfacts")?.execute(context(commands, "catfacts"), []), "Cat fact lookup is not available.");
   assert.equal(await commands.get("voting")?.execute(context(commands), []), "Sorry, voting stats are currently not available.");
@@ -225,6 +228,12 @@ test("explicitly disabled legacy commands keep their legacy messages", async () 
   assert.equal(await commands.get("investors")?.execute(context(commands), ["91"]), "Investor report is not available.");
   assert.equal(await commands.get("prediction")?.execute(context(commands, "prediction"), ["dublup"]), "Prediction lookup is not available. The legacy Dublup API is no longer usable.");
   assert.equal(await commands.get("bidbots")?.execute(context(commands), ["palnet"]), "Bidbot report is not available.");
+});
+
+test("version reports Banjo's package version", async () => {
+  const commands = registry();
+
+  assert.equal(await commands.get("version")?.execute(context(commands), []), `banjo-bot v${packageJson.version}`);
 });
 
 test("birthday reports tracked legacy birthdays", async () => {

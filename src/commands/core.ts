@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -10,6 +11,9 @@ import {
   type StringSelectMenuInteraction,
 } from "discord.js";
 import type { Command, CommandReplyOptions } from "./types.js";
+
+const require = createRequire(import.meta.url);
+const packageJson = require("../../package.json") as { version: string };
 
 export const coreCommands: Command[] = [
   {
@@ -42,10 +46,10 @@ export const coreCommands: Command[] = [
   },
   {
     name: "version",
-    description: "Show Cosgrove upstream status.",
+    description: "Show Banjo's running version.",
     usage: "version",
     category: "core",
-    execute: () => "Cosgrove version lookup is not available in this Banjo build.",
+    execute: () => `banjo-bot v${packageJson.version}`,
   },
   {
     name: "slap",
