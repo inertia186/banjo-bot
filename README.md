@@ -97,6 +97,8 @@ See [docs/migration.md](docs/migration.md) for the legacy command inventory and 
 
 See [docs/api-notes.md](docs/api-notes.md) for Hive API behavior learned while porting commands.
 
+See [docs/embed-modernization-plan.md](docs/embed-modernization-plan.md) for the plan to modernize structured command output with Discord embeds.
+
 See [docs/companion-spa.md](docs/companion-spa.md) for the planned maintainer SPA.
 
 ## License

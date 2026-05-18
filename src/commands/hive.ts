@@ -1,14 +1,23 @@
-import { EmbedBuilder } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, type ButtonInteraction, type Message } from "discord.js";
+import type { AppConfig } from "../config.js";
 import { HiveRpcClient, type HiveAccount, type HiveAccountOperation, type HiveApi, type HiveCommunity, type HiveDynamicGlobalProperties, type HiveFeedHistory, type HiveMarketTicker, type HivePost, type HiveProposal, type HiveRewardOperation, type HiveWitness } from "../hive/api.js";
 import { HiveEngineRpcClient, type HiveEngineApi, type HiveEngineBalance, type HiveEngineBuyOrder, type HiveEngineMarketMetrics, type HiveEngineNft, type HiveEngineToken, type HiveEngineTrade, type NftShowroomArt } from "../hive-engine/api.js";
 import { ScotHttpClient, type ScotAccountHistoryEntry, type ScotApi, type ScotConfigEntry, type ScotDiscussion } from "../hive-engine/scot.js";
 import { HiveDeveloperNodeDirectory, type HiveNode, type HiveNodeDirectory } from "../hive/nodes.js";
 import { HiveSqlClient, type HiveSqlApi, type HiveSqlAppPayout, type HiveSqlBadge, type HiveSqlBadgeStats, type HiveSqlDistributionBucket, type HiveSqlDistributionSummary, type HiveSqlPromotedSummary, type HiveSqlSearchComment, type HiveSqlSearchOptions, type HiveSqlSearchResult, type HiveSqlTopKind, type HiveSqlTopPost, type HiveSqlTopPostOptions } from "../hivesql/api.js";
 import { CoinGeckoMarketClient, type FearGreedIndex, type MarketApi, type MarketTicker } from "../market/api.js";
+import type { Logger } from "../logger.js";
+import { asEmbedResponse, banjoEmbed, dataField, truncateEmbedText } from "./embeds.js";
 import type { Command, CommandContext } from "./types.js";
 
 const HIVE_TOKEN_ICON_URL = "https://assets.coingecko.com/coins/images/10840/standard/logo_transparent_4x.png";
 const WRAPPED_TOKEN_SYMBOLS = new Set(["STEEM", "SBD", "BTC", "LTC"]);
+const nftsrButtonPrefix = "nftsr";
+const nftsrNoAccount = "~";
+const proposalButtonPrefix = "proposal";
+const searchButtonPrefix = "search";
+const searchResultCache = new Map<string, { options: HiveSqlSearchOptions; result: HiveSqlSearchResult; posts: Map<string, HivePost | null>; createdAt: number }>();
+let searchResultCacheCounter = 0;
 
 export const hiveCommands: Command[] = [
   {
@@ -21,7 +30,7 @@ export const hiveCommands: Command[] = [
       const reputation = await hiveApi(context).getAccountReputation(accountName);
       if (!reputation) return unknownAccount(accountName);
 
-      return `${reputation.account} has reputation **${formatReputation(reputation.reputation)}**.`;
+      return asEmbedResponse(formatReputationEmbed(reputation.account, reputation.reputation));
     },
   },
   {
@@ -42,13 +51,7 @@ export const hiveCommands: Command[] = [
       const hivePower = calculateHivePower(account, globals.total_vesting_fund_hive, globals.total_vesting_shares);
       const votingPower = calculateVotingPower(account);
 
-      return [
-        `**${account.name}**`,
-        `Hive Power: **${formatNumber(hivePower, 3)} HP**`,
-        votingPower === null ? null : `Voting Power: **${formatNumber(votingPower, 2)}%**`,
-      ]
-        .filter(Boolean)
-        .join("\n");
+      return asEmbedResponse(formatPower(account, hivePower, votingPower));
     },
   },
   {
@@ -139,9 +142,7 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const account = await requireAccount(context, args);
-      return account.proxy
-        ? `${account.name} is proxied to **${account.proxy}**.`
-        : `${account.name} is not using a witness proxy.`;
+      return asEmbedResponse(formatProxy(account));
     },
   },
   {
@@ -174,11 +175,7 @@ export const hiveCommands: Command[] = [
       if (!account) return unknownAccount(accountName);
 
       if (account.proxy) {
-        return [
-          `**Approved by: ${account.name}**`,
-          `https://hiveblocks.com/@${account.name}`,
-          `Proxied to: **${account.proxy}**`,
-        ].join("\n");
+        return asEmbedResponse(formatApproval(account, [], "hive.fund"));
       }
 
       const [config, proposalVotes] = await Promise.all([
@@ -186,7 +183,7 @@ export const hiveCommands: Command[] = [
         hive.listProposalVotes(account.name),
       ]);
 
-      return formatApproval(account, proposalVotes, config.HIVE_TREASURY_ACCOUNT ?? "hive.fund");
+      return asEmbedResponse(formatApproval(account, proposalVotes, config.HIVE_TREASURY_ACCOUNT ?? "hive.fund"));
     },
   },
   {
@@ -201,7 +198,7 @@ export const hiveCommands: Command[] = [
       const community = await hiveApi(context).getCommunity(query);
       if (!community) return `Unable to find community with: \`${query}\``;
 
-      return formatCommunity(community);
+      return asEmbedResponse(formatCommunity(community));
     },
   },
   {
@@ -220,7 +217,7 @@ export const hiveCommands: Command[] = [
       }
 
       const result = await hiveSql.searchComments(parsed);
-      return formatSearchResult(parsed, result);
+      return formatSearchResult(parsed, result, hiveApi(context));
     },
   },
   {
@@ -240,7 +237,7 @@ export const hiveCommands: Command[] = [
         hiveSql.getPromotedSummary("today"),
       ]);
 
-      return [formatPromotedSummary(yesterday), formatPromotedSummary(today)].join("\n");
+      return asEmbedResponse(formatPromotedSummaries(yesterday, today));
     },
   },
   {
@@ -256,7 +253,9 @@ export const hiveCommands: Command[] = [
       if (typeof parsed === "string") return parsed;
 
       const post = await hiveSql.getTopPost(parsed);
-      return formatTopPost(parsed, post);
+      const hydratedPost = post ? await hiveApi(context).getPostCreation(post.author, post.permlink) : null;
+      const response = formatTopPost(parsed, post, hydratedPost);
+      return typeof response === "string" ? response : asEmbedResponse(response);
     },
   },
   {
@@ -274,7 +273,7 @@ export const hiveCommands: Command[] = [
 
       const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       const apps = await hiveSql.getAppPayouts({ since, limit });
-      return formatAppPayouts(apps, since, limit);
+      return asEmbedResponse(formatAppPayouts(apps, since, limit));
     },
   },
   {
@@ -297,7 +296,8 @@ export const hiveCommands: Command[] = [
         hive.getFeedHistory(),
       ]);
 
-      return formatDistribution(distribution, globals.total_vesting_fund_hive, globals.total_vesting_shares, feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+      const response = formatDistribution(distribution, globals.total_vesting_fund_hive, globals.total_vesting_shares, feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+      return typeof response === "string" ? response : asEmbedResponse(response);
     },
   },
   {
@@ -312,7 +312,7 @@ export const hiveCommands: Command[] = [
       const badges = await hiveSql.findBadges(args.map((arg) => arg.toLowerCase()), 20);
       if (badges.length === 0) return `Unable to find badges with: \`${args.join(" ")}\``;
 
-      return formatBadges(await hydrateBadges(context, badges), args);
+      return asEmbedResponse(formatBadges(await hydrateBadges(context, badges), args));
     },
   },
   {
@@ -330,7 +330,7 @@ export const hiveCommands: Command[] = [
 
       const stats = await hiveSql.getBadgeStats(badge.name);
       const [hydratedBadge] = await hydrateBadges(context, [badge]);
-      return formatBadge(hydratedBadge ?? badge, stats);
+      return asEmbedResponse(formatBadge(hydratedBadge ?? badge, stats));
     },
   },
   {
@@ -361,21 +361,16 @@ export const hiveCommands: Command[] = [
       const returnProposal = findReturnProposal(proposals, treasuryAccount);
       const selected = matches
         .sort((a, b) => parseProposalVotes(a) - parseProposalVotes(b))
-        .slice(-3)
+        .slice(-10)
         .reverse();
-      const responses: string[] = [];
-
-      for (const proposal of selected) {
-        const voters = await hive.listProposalVotesByProposal(proposalId(proposal));
-        responses.push(formatProposal(proposal, {
-          approvedDailyPay: funding.get(proposalId(proposal)) ?? 0,
-          basePerMvest,
-          returnProposal,
-          voterCount: new Set(voters.map((vote) => vote.voter)).size,
-        }));
-      }
-
-      return responses.join("\n\n");
+      return formatProposalResponse({
+        hive,
+        selected,
+        selectedIndex: 0,
+        funding,
+        basePerMvest,
+        returnProposal,
+      });
     },
   },
   {
@@ -479,7 +474,7 @@ export const hiveCommands: Command[] = [
       if (!hiveSql) return "HiveSQL is not configured, so claim lookup is unavailable.";
 
       try {
-        return formatClaimSummary(await hiveSql.getClaimSummary(timeframe));
+        return asEmbedResponse(formatClaimSummary(await hiveSql.getClaimSummary(timeframe)));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return `HiveSQL claim lookup failed: ${message}`;
@@ -499,7 +494,7 @@ export const hiveCommands: Command[] = [
       if (!hiveSql) return "HiveSQL is not configured, so account summary lookup is unavailable.";
 
       try {
-        return formatAccountSummary(await hiveSql.getAccountSummary());
+        return asEmbedResponse(formatAccountSummary(await hiveSql.getAccountSummary()));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return `HiveSQL account summary lookup failed: ${message}`;
@@ -516,7 +511,7 @@ export const hiveCommands: Command[] = [
       const chainError = requireHiveChain(chain);
       if (chainError) return chainError;
 
-      return formatInflationProjection(years);
+      return asEmbedResponse(formatInflationProjection(years));
     },
   },
   {
@@ -529,19 +524,7 @@ export const hiveCommands: Command[] = [
       if (chainError) return chainError;
 
       const rewardFund = await hiveApi(context).getRewardFund("post");
-      const claims = Number.parseFloat(rewardFund.recent_claims);
-      const claimsText = Number.isFinite(claims) ? formatInteger(claims) : rewardFund.recent_claims;
-
-      return [
-        "**Hive reward pool**",
-        `Balance: **${formatAsset(rewardFund.reward_balance, 3)}**`,
-        `Recent claims: **${claimsText}**`,
-        typeof rewardFund.percent_curation_rewards === "number"
-          ? `Curation rewards: **${formatNumber(rewardFund.percent_curation_rewards / 100, 2)}%**`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
+      return asEmbedResponse(formatRewardPool(rewardFund));
     },
   },
   {
@@ -551,25 +534,27 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const input = args[0];
-      if (!input || input === "^") return "Sorry, I wasn't paying attention.";
-
-      const ref = parsePostRef(input);
-      if (!ref) return "Usage: `$calcreward <url-or-@author/permlink>`";
+      const target = await resolveCalculatedRewardTarget(context, input);
+      if (typeof target === "string") return target;
 
       const hive = hiveApi(context);
       const [post, rewardFund, feedHistory] = await Promise.all([
-        hive.getPostCreation(ref.author, ref.permlink),
+        hive.getPostCreation(target.ref.author, target.ref.permlink),
         hive.getRewardFund("post"),
         hive.getFeedHistory(),
       ]);
-      if (!post) return `Unable to find post @${ref.author}/${ref.permlink}.`;
+      if (!post) return `Unable to find post @${target.ref.author}/${target.ref.permlink}.`;
 
       const cashoutTime = post.cashout_time ? parseHiveDate(post.cashout_time) : null;
       if (cashoutTime && cashoutTime.getTime() < Date.now()) {
         return "Sorry, this calculation only makes sense for posts within the first payout timeframe.";
       }
 
-      return formatCalculatedReward(post, rewardFund.reward_balance, feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+      if (!target.unfurl) {
+        return formatCalculatedRewardText(post, rewardFund.reward_balance, feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+      }
+
+      return asEmbedResponse(formatCalculatedRewardEmbed(post, rewardFund.reward_balance, feedHistory.current_median_history.base, feedHistory.current_median_history.quote));
     },
   },
   {
@@ -582,37 +567,37 @@ export const hiveCommands: Command[] = [
       const symbol = (args[1] ?? "HIVE").toUpperCase();
 
       const hive = hiveApi(context);
-      const market = marketApi(context);
       if (symbol !== "HIVE") {
-        const [account, rewards, trade, hiveUsdPrice] = await Promise.all([
+        const [account, rewards, token, trade, feedHistory] = await Promise.all([
           hive.getAccount(accountName),
           scotApi(context).getAccountHistory(accountName, symbol, 100000),
+          hiveEngineApi(context).getToken(symbol),
           hiveEngineApi(context).getLatestTrade(symbol),
-          market.getHiveUsdPrice(),
+          hive.getFeedHistory(),
         ]);
         if (!account) return unknownAccount(accountName);
 
-        const summary = summarizeScotRewards(symbol, rewards, trade, hiveUsdPrice);
+        const hbdPerHive = parseFeedPrice(feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+        const summary = summarizeScotRewards(symbol, rewards, trade, hbdPerHive);
         if (!summary) return `No ${symbol} rewards for ${account.name} (bad timeframe or invalid symbol)`;
 
-        return formatScotRewards(account.name, symbol, summary);
+        return asEmbedResponse(formatScotRewards(account.name, symbol, summary, token));
       }
 
-      const [account, globals, feedHistory, hiveUsdPrice, rewardOperations] = await Promise.all([
+      const [account, globals, feedHistory, rewardOperations] = await Promise.all([
         hive.getAccount(accountName),
         hive.getDynamicGlobalProperties(),
         hive.getFeedHistory(),
-        market.getHiveUsdPrice(),
         hive.getRewardOperations(accountName),
       ]);
       if (!account) return unknownAccount(accountName);
 
       const hivePerVest = parseAsset(globals.total_vesting_fund_hive) / parseAsset(globals.total_vesting_shares);
       const hbdPerHive = parseFeedPrice(feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
-      const summary = summarizeRewards(account.name, rewardOperations, hivePerVest, hbdPerHive, hiveUsdPrice);
+      const summary = summarizeRewards(account.name, rewardOperations, hivePerVest, hbdPerHive, hbdPerHive);
       if (!summary) return `No HIVE rewards for ${account.name} (bad timeframe or invalid symbol)`;
 
-      return formatRewards(account.name, summary);
+      return asEmbedResponse(formatRewards(account.name, summary));
     },
   },
   {
@@ -626,10 +611,7 @@ export const hiveCommands: Command[] = [
         ? nodes
         : context.config.hive.nodes.map((url) => ({ url }));
 
-      return [
-        "**Hive public nodes**",
-        ...displayNodes.map((node) => node.owner ? `${node.url} ${node.owner}` : node.url),
-      ].join("\n");
+      return asEmbedResponse(formatNodes(displayNodes, context.config.hive.nodesSourceUrl));
     },
   },
   {
@@ -648,7 +630,7 @@ export const hiveCommands: Command[] = [
       ]);
       if (!ticker) return "Unable to load HIVE ticker data.";
 
-      return formatTicker(ticker, feedHistory.current_median_history.base, feedHistory.current_median_history.quote);
+      return asEmbedResponse(formatTicker(ticker, feedHistory.current_median_history.base, feedHistory.current_median_history.quote));
     },
   },
   {
@@ -692,7 +674,7 @@ export const hiveCommands: Command[] = [
       const index = await marketApi(context).getFearGreedIndex(3);
       if (!index) return "Unable to load the Crypto Fear & Greed Index.";
 
-      return formatFearGreed(index, daysAgo);
+      return asEmbedResponse(formatFearGreed(index, daysAgo));
     },
   },
   {
@@ -772,7 +754,7 @@ export const hiveCommands: Command[] = [
       ]);
       if (!token || balanceResult.balances.length === 0) return `Unknown token: ${symbol}`;
 
-      return formatHiveEngineRichlist(symbol, balanceResult.balances, count, balanceResult.truncated);
+      return asEmbedResponse(formatHiveEngineRichlist(token, balanceResult.balances, count, balanceResult.truncated));
     },
   },
   {
@@ -792,7 +774,8 @@ export const hiveCommands: Command[] = [
       ]);
       if (!token || balanceResult.balances.length === 0) return `Unknown token: ${symbol}`;
 
-      return formatHiveEngineStaked(symbol, balanceResult.balances, count, balanceResult.truncated);
+      const response = formatHiveEngineStaked(token, balanceResult.balances, count, balanceResult.truncated);
+      return typeof response === "string" ? response : asEmbedResponse(response);
     },
   },
   {
@@ -806,16 +789,16 @@ export const hiveCommands: Command[] = [
       if (symbols.length > 3) return "Requesting more than 3 NFTs is not supported in this Banjo build.";
 
       const hiveEngine = hiveEngineApi(context);
-      const results: string[] = [];
+      const embeds: EmbedBuilder[] = [];
 
       for (const symbol of symbols) {
         const nft = await hiveEngine.getNft(symbol);
         if (!nft) return `Unknown nft: ${symbol}`;
 
-        results.push(formatHiveEngineNft(nft));
+        embeds.push(formatHiveEngineNft(nft));
       }
 
-      return results.join("\n\n");
+      return { embeds };
     },
   },
   {
@@ -832,7 +815,7 @@ export const hiveCommands: Command[] = [
       if (!art) return `Unable to find NFT: \`${args.join(" ")}\``;
       if (!art.published) return `That NFT is unpublished: \`${args.join(" ")}\``;
 
-      return formatNftShowroomArt(art);
+      return formatNftShowroomResponse(art, account, index);
     },
   },
   {
@@ -863,7 +846,7 @@ export const hiveCommands: Command[] = [
       if (!trade) return `No trading history for ${symbol}.`;
       if (buyBook.length === 0) return `Empty buy book for ${symbol}.`;
 
-      return formatTt2x(symbol, limit, discussions, trade, buyBook, hiveUsdPrice);
+      return asEmbedResponse(formatTt2x(token, limit, discussions, trade, buyBook, hiveUsdPrice));
     },
   },
   {
@@ -896,29 +879,13 @@ export const hiveCommands: Command[] = [
       if (type === "price") {
         const feedHistory = await hive.getFeedHistory();
 
-        return [
-          "**Hive feed price**",
-          `Median: **${formatPrice(feedHistory.current_median_history)}**`,
-          feedHistory.market_median_history ? `Market median: **${formatPrice(feedHistory.market_median_history)}**` : null,
-          feedHistory.current_min_history ? `Low: **${formatPrice(feedHistory.current_min_history)}**` : null,
-          feedHistory.current_max_history ? `High: **${formatPrice(feedHistory.current_max_history)}**` : null,
-        ]
-          .filter(Boolean)
-          .join("\n");
+        return asEmbedResponse(formatFeedPrice(feedHistory));
       }
 
       if (type === "apr") {
         const globals = await hive.getDynamicGlobalProperties();
 
-        return [
-          "**Hive HBD policy**",
-          typeof globals.hbd_interest_rate === "number" ? `HBD interest rate: **${formatProtocolPercent(globals.hbd_interest_rate)}**` : null,
-          typeof globals.hbd_print_rate === "number" ? `HBD print rate: **${formatProtocolPercent(globals.hbd_print_rate)}**` : null,
-          typeof globals.hbd_start_percent === "number" ? `Start reducing HBD printing at: **${formatProtocolPercent(globals.hbd_start_percent)}**` : null,
-          typeof globals.hbd_stop_percent === "number" ? `Stop HBD printing at: **${formatProtocolPercent(globals.hbd_stop_percent)}**` : null,
-        ]
-          .filter(Boolean)
-          .join("\n");
+        return asEmbedResponse(formatFeedPolicy(globals));
       }
 
       return `Unknown feed type: ${type}`;
@@ -943,13 +910,7 @@ export const hiveCommands: Command[] = [
       const nextLiveTime = new Date(`${nextHardfork.live_time}Z`);
       const nextLabel = nextLiveTime.getTime() <= Date.now() ? "Last" : "Next";
 
-      return [
-        `Current: \`${currentVersion}\`; Witness Majority: \`${witnessSchedule.majority_version}\`; ${nextLabel}: \`${nextHardfork.hf_version}\` (${formatRelativeTime(nextLiveTime)})`,
-        "Version Votes by Top 100 Witnesses:",
-        "```markdown",
-        hardforkVersionTable(witnesses),
-        "```",
-      ].join("\n");
+      return asEmbedResponse(formatHardfork(currentVersion, witnessSchedule.majority_version, nextLabel, nextHardfork.hf_version, nextLiveTime, witnesses));
     },
   },
   {
@@ -963,14 +924,7 @@ export const hiveCommands: Command[] = [
 
       const globals = await hiveApi(context).getDynamicGlobalProperties();
 
-      return [
-        "**Hive supply**",
-        globals.current_supply ? `Current HIVE: **${formatAsset(globals.current_supply, 3)}**` : null,
-        globals.virtual_supply ? `Virtual HIVE: **${formatAsset(globals.virtual_supply, 3)}**` : null,
-        globals.current_hbd_supply ? `Current HBD: **${formatAsset(globals.current_hbd_supply, 3)}**` : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
+      return asEmbedResponse(formatSupply(globals));
     },
   },
   {
@@ -983,7 +937,7 @@ export const hiveCommands: Command[] = [
       const witness = await hiveApi(context).getWitnessByAccount(accountName);
       if (!witness) return `${accountName} is not a Hive witness.`;
 
-      return formatWitness(witness);
+      return asEmbedResponse(formatWitness(witness));
     },
   },
   {
@@ -1037,10 +991,7 @@ export const hiveCommands: Command[] = [
       const followCount = await hiveApi(context).getFollowCount(accountName);
       if (!followCount) return unknownAccount(accountName);
 
-      return [
-        `**${accountName}'s followers:** \`${formatInteger(followCount.follower_count)}\``,
-        `**following:** \`${formatInteger(followCount.following_count)}\``,
-      ].join("; ");
+      return asEmbedResponse(formatFollows(accountName, followCount.follower_count, followCount.following_count));
     },
   },
   {
@@ -1060,9 +1011,7 @@ export const hiveCommands: Command[] = [
       }
 
       const createdAt = new Date(`${post.created}Z`);
-      const title = post.title || `@${post.author}/${post.permlink}`;
-
-      return `${title} by @${post.author} was posted ${formatRelativeAge(createdAt)} ago (${formatUtc(createdAt)} UTC).`;
+      return asEmbedResponse(formatPostAge(post, createdAt));
     },
   },
 ];
@@ -1089,6 +1038,89 @@ function hiveEngineApi(context: CommandContext): HiveEngineApi {
 
 function scotApi(context: CommandContext): ScotApi {
   return context.services?.scot ?? new ScotHttpClient(context.config, context.logger);
+}
+
+function formatNodes(nodes: HiveNode[], sourceUrl: string): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive Public Nodes")
+    .setURL(sourceUrl)
+    .setDescription(nodes.map((node, index) => {
+      const owner = node.owner ? ` ${node.owner}` : "";
+      return `${index + 1}. ${node.url}${owner}`;
+    }).join("\n"))
+    .setFooter({ text: "Hive Developer Portal", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Nodes", String(nodes.length)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatPower(account: HiveAccount, hivePower: number, votingPower: number | null): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle(account.name)
+    .setURL(hiveHubAccountUrl(account.name))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(account.name)}/avatar`)
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Hive Power", `${formatNumber(hivePower, 3)} HP`),
+    dataField("Voting Power", votingPower === null ? null : `${formatNumber(votingPower, 2)}%`),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatReputationEmbed(accountName: string, reputation: string | number): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle(accountName)
+    .setURL(hiveHubAccountUrl(accountName))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(accountName)}/avatar`)
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Reputation", formatReputation(reputation)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatProxy(account: HiveAccount): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle(account.name)
+    .setURL(hiveHubAccountUrl(account.name))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(account.name)}/avatar`)
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Witness Proxy", account.proxy ? `@${account.proxy}` : "None"),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatFollows(accountName: string, followers: number, following: number): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle(accountName)
+    .setURL(hiveHubAccountUrl(accountName))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(accountName)}/avatar`)
+    .setFooter({ text: "Hivemind Social", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Followers", formatInteger(followers)),
+    dataField("Following", formatInteger(following)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function hiveHubAccountUrl(accountName: string): string {
+  return `https://hivehub.dev/stats/account?username=${encodeURIComponent(accountName)}`;
+}
+
+function accountMarkdownLink(accountName: string): string {
+  return `[@${accountName}](${hiveHubAccountUrl(accountName)})`;
 }
 
 function hiveSqlApi(context: CommandContext): HiveSqlApi | null {
@@ -1231,26 +1263,57 @@ function formatClaimSummary(summary: {
   rewardHbd: number;
   rewardHive: number;
   rewardVests: number;
-}): string {
-  return [
-    `${pluralize(summary.count, "claim")} ${summary.timeframe} (by ${pluralize(summary.uniqueAccounts, "unique account")}):`,
-    `\`${formatNumber(summary.rewardHbd, 3)} HBD\`;`,
-    `\`${formatNumber(summary.rewardHive, 3)} HIVE\`;`,
-    `\`${formatNumber(summary.rewardVests / 1_000_000, 3)} MVESTS\``,
-  ].join(" ");
+}): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive Reward Claims")
+    .setDescription(summary.timeframe)
+    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Claims", formatInteger(summary.count)),
+    dataField("Unique Accounts", formatInteger(summary.uniqueAccounts)),
+    dataField("Rewards", [
+      `${formatNumber(summary.rewardHbd, 3)} HBD`,
+      `${formatNumber(summary.rewardHive, 3)} HIVE`,
+      `${formatNumber(summary.rewardVests / 1_000_000, 3)} MVESTS`,
+    ].join(" / "), false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
-function formatAccountSummary(summary: { total: number; mined: number; communities: number; badges: number }): string {
-  return [
-    "```",
-    [
-      `Total Hive accounts: ${formatInteger(summary.total)}`,
-      `mined: ${formatInteger(summary.mined)}`,
-      `communities: ${formatInteger(summary.communities)}`,
-      `badges: ${formatInteger(summary.badges)}`,
-    ].join("; "),
-    "```",
-  ].join("\n");
+function formatAccountSummary(summary: { total: number; mined: number; communities: number; badges: number }): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive Accounts")
+    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Total", formatInteger(summary.total)),
+    dataField("Mined", formatInteger(summary.mined)),
+    dataField("Communities", formatInteger(summary.communities)),
+    dataField("Badges", formatInteger(summary.badges)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatRewardPool(rewardFund: { reward_balance: string; recent_claims: string; percent_curation_rewards?: number }): EmbedBuilder {
+  const claims = Number.parseFloat(rewardFund.recent_claims);
+  const claimsText = Number.isFinite(claims) ? formatInteger(claims) : rewardFund.recent_claims;
+  const embed = banjoEmbed()
+    .setTitle("Hive Reward Pool")
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Balance", formatAsset(rewardFund.reward_balance, 3)),
+    dataField("Recent Claims", claimsText),
+    dataField(
+      "Curation Rewards",
+      typeof rewardFund.percent_curation_rewards === "number" ? `${formatNumber(rewardFund.percent_curation_rewards / 100, 2)}%` : null,
+    ),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 type RewardTotals = {
@@ -1447,53 +1510,128 @@ function parseFeedPrice(base: string, quote: string): number | null {
   return baseAmount / quoteAmount;
 }
 
-function formatRewards(accountName: string, summary: RewardSummary): string {
-  const lines = [
-    `**HIVE rewards for ${accountName} since ${formatRelativeAge(summary.startingAt)} ago**`,
-    `producer: ${formatRewardValue(summary.producer)}`,
-    `interest: ${formatRewardValue(summary.interest)}`,
-    `curation: ${formatRewardValue(summary.curation)}`,
-    `author: ${formatRewardValue(summary.author)}`,
-    `benefactor: ${formatRewardValue(summary.benefactor)}`,
-    `total: ${formatRewardValue(summary.total)}`,
-    `USD: ${summary.usd === null ? "None" : formatNumber(summary.usd, 2)}`,
-    `USD per day: ${summary.usdPerDay === null ? "None" : formatNumber(summary.usdPerDay, 2)}`,
-  ];
+function formatRewards(accountName: string, summary: RewardSummary): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle(`HIVE rewards for ${accountName}`)
+    .setURL(hiveHubAccountUrl(accountName))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(accountName)}/avatar`)
+    .setDescription(`Since ${formatRelativeAge(summary.startingAt)} ago (${formatUtc(summary.startingAt)} UTC)`)
+    .setFooter({ text: "Hive Account History", iconURL: HIVE_TOKEN_ICON_URL });
 
-  return lines.join("\n");
+  embed.addFields([
+    dataField("Producer", formatRewardValue(summary.producer)),
+    dataField("Interest", formatRewardValue(summary.interest)),
+    dataField("Curation / Author / Benefactor", [
+      formatRewardValue(summary.curation),
+      formatRewardValue(summary.author),
+      formatRewardValue(summary.benefactor),
+    ].join(" / "), false),
+    dataField("Total / USD / USD Per Day", [
+      formatRewardValue(summary.total),
+      summary.usd === null ? "None" : formatNumber(summary.usd, 2),
+      summary.usdPerDay === null ? "None" : formatNumber(summary.usdPerDay, 2),
+    ].join(" / "), false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
-function formatScotRewards(accountName: string, symbol: string, summary: ScotRewardSummary): string {
-  return [
-    `**${symbol} rewards for ${accountName} since ${formatRelativeAge(summary.startingAt)} ago**`,
-    `staking: ${formatRewardValue(summary.staking)}`,
-    `curation: ${formatRewardValue(summary.curation)}`,
-    `author: ${formatRewardValue(summary.author)}`,
-    `benefactor: ${formatRewardValue(summary.benefactor)}`,
-    `mining: ${formatRewardValue(summary.mining)}`,
-    `total: ${formatRewardValue(summary.total)}`,
-    `HIVE: ${summary.hive === null ? "None" : formatNumber(summary.hive, 3)}`,
-    `USD: ${summary.usd === null ? "None" : formatNumber(summary.usd, 2)}`,
-    `USD per day: ${summary.usdPerDay === null ? "None" : formatNumber(summary.usdPerDay, 2)}`,
-  ].join("\n");
+function formatScotRewards(accountName: string, symbol: string, summary: ScotRewardSummary, token: HiveEngineToken | null): EmbedBuilder {
+  const metadata = parseTokenMetadata(token?.metadata);
+  const embed = banjoEmbed()
+    .setTitle(`${symbol} rewards for ${accountName}`)
+    .setURL(hiveHubAccountUrl(accountName))
+    .setThumbnail(normalizeTokenIconUrl(symbol, metadata.icon))
+    .setDescription(`Since ${formatRelativeAge(summary.startingAt)} ago (${formatUtc(summary.startingAt)} UTC)`)
+    .setFooter({
+      text: "SCOT + Hive Engine",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
+
+  embed.addFields([
+    dataField("Staking", formatRewardValue(summary.staking)),
+    dataField("Mining", formatRewardValue(summary.mining)),
+    dataField("HIVE", summary.hive === null ? "None" : formatNumber(summary.hive, 3)),
+    dataField("Curation / Author / Benefactor", [
+      formatRewardValue(summary.curation),
+      formatRewardValue(summary.author),
+      formatRewardValue(summary.benefactor),
+    ].join(" / "), false),
+    dataField("Total / USD / USD Per Day", [
+      formatRewardValue(summary.total),
+      summary.usd === null ? "None" : formatNumber(summary.usd, 2),
+      summary.usdPerDay === null ? "None" : formatNumber(summary.usdPerDay, 2),
+    ].join(" / "), false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function formatRewardValue(value: number): string {
   return value === 0 ? "None" : formatNumber(value, 3);
 }
 
-function formatTicker(ticker: MarketTicker, feedBase: string, feedQuote: string): string {
+function formatTicker(ticker: MarketTicker, feedBase: string, feedQuote: string): EmbedBuilder {
   const feedPrice = parseFeedPrice(feedBase, feedQuote);
-  return [
-    "**Hive ticker**",
-    `HIVE/USD: **$${formatNumber(ticker.usd, ticker.usd >= 1 ? 2 : 4)}**`,
-    feedPrice === null ? null : `Feed: **${formatNumber(feedPrice, 4)} HBD / HIVE**`,
-    ticker.usd24hChange === null ? null : `24h: **${formatSignedPercent(ticker.usd24hChange)}**`,
-    ticker.usd24hVolume === null ? null : `Volume: **$${formatNumber(ticker.usd24hVolume, 0)}**`,
-    ticker.usdMarketCap === null ? null : `Market cap: **$${formatNumber(ticker.usdMarketCap, 0)}**`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const embed = banjoEmbed()
+    .setTitle("Hive Market Ticker")
+    .setURL("https://www.coingecko.com/en/coins/hive")
+    .setThumbnail(HIVE_TOKEN_ICON_URL)
+    .setFooter({ text: "CoinGecko + Hive feed", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("HIVE/USD", `$${formatNumber(ticker.usd, ticker.usd >= 1 ? 2 : 4)}`),
+    dataField("Feed", feedPrice === null ? null : `${formatNumber(feedPrice, 4)} HBD / HIVE`),
+    dataField("24h", ticker.usd24hChange === null ? null : formatSignedPercent(ticker.usd24hChange)),
+    dataField("Volume", ticker.usd24hVolume === null ? null : `$${formatNumber(ticker.usd24hVolume, 0)}`),
+    dataField("Market Cap", ticker.usdMarketCap === null ? null : `$${formatNumber(ticker.usdMarketCap, 0)}`),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatFeedPrice(feedHistory: HiveFeedHistory): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive Feed Price")
+    .setFooter({ text: "Hive feed", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Median", formatPrice(feedHistory.current_median_history)),
+    dataField("Market Median", feedHistory.market_median_history ? formatPrice(feedHistory.market_median_history) : null),
+    dataField("Low", feedHistory.current_min_history ? formatPrice(feedHistory.current_min_history) : null),
+    dataField("High", feedHistory.current_max_history ? formatPrice(feedHistory.current_max_history) : null),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatFeedPolicy(globals: HiveDynamicGlobalProperties): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive HBD Policy")
+    .setFooter({ text: "Hive feed", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("HBD Interest Rate", typeof globals.hbd_interest_rate === "number" ? formatProtocolPercent(globals.hbd_interest_rate) : null),
+    dataField("HBD Print Rate", typeof globals.hbd_print_rate === "number" ? formatProtocolPercent(globals.hbd_print_rate) : null),
+    dataField("Start Reducing", typeof globals.hbd_start_percent === "number" ? formatProtocolPercent(globals.hbd_start_percent) : null),
+    dataField("Stop Printing", typeof globals.hbd_stop_percent === "number" ? formatProtocolPercent(globals.hbd_stop_percent) : null),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatSupply(globals: HiveDynamicGlobalProperties): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive Supply")
+    .setFooter({ text: "Hive dynamic global properties", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Current HIVE", globals.current_supply ? formatAsset(globals.current_supply, 3) : null),
+    dataField("Virtual HIVE", globals.virtual_supply ? formatAsset(globals.virtual_supply, 3) : null),
+    dataField("Current HBD", globals.current_hbd_supply ? formatAsset(globals.current_hbd_supply, 3) : null),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function formatSignedPercent(value: number): string {
@@ -1542,7 +1680,9 @@ function readStakedCount(value: string | undefined): number {
   return Number.isFinite(parsed) ? Math.min(25, Math.max(1, parsed)) : 12;
 }
 
-function formatHiveEngineRichlist(symbol: string, balances: HiveEngineBalance[], count: number, truncated: boolean): string {
+function formatHiveEngineRichlist(token: HiveEngineToken, balances: HiveEngineBalance[], count: number, truncated: boolean): EmbedBuilder {
+  const symbol = token.symbol;
+  const metadata = parseTokenMetadata(token.metadata);
   const sorted = balances
     .map((balance) => ({
       account: balance.account,
@@ -1554,20 +1694,29 @@ function formatHiveEngineRichlist(symbol: string, balances: HiveEngineBalance[],
   const nullBalance = sorted.find((balance) => balance.account === "null");
   const displayBalances = sorted.filter((balance) => balance.account !== "null");
 
-  return [
-    `**Top ${displayBalances.length} by Total Balance: ${symbol}**`,
-    `https://he.dtools.dev/richlist/${encodeURIComponent(symbol)}`,
-    "```",
-    ...displayBalances.map((balance, index) =>
-      `${String(index + 1).padStart(2)}. ${balance.account.padEnd(16)} ${formatNumber(balance.total, 0)} ${balance.symbol}`
-    ),
-    "```",
-    nullBalance ? `null: ${formatNumber(nullBalance.total, 0)} ${nullBalance.symbol}` : null,
-    truncated ? "Note: Hive Engine returned more balances than the RPC offset limit allows; ranked from the first 11,000 rows." : null,
-  ].filter(Boolean).join("\n");
+  const embed = banjoEmbed()
+    .setTitle(`Top ${displayBalances.length} by Total Balance: ${symbol}`)
+    .setURL(`https://he.dtools.dev/richlist/${encodeURIComponent(symbol)}`)
+    .setThumbnail(normalizeTokenIconUrl(symbol, metadata.icon))
+    .setDescription(displayBalances.map((balance, index) =>
+      `${index + 1}. [${balance.account}](https://he.dtools.dev/@${encodeURIComponent(balance.account)}?symbol=${encodeURIComponent(symbol)}) - \`${formatNumber(balance.total, 0)} ${balance.symbol}\``
+    ).join("\n"))
+    .setFooter({
+      text: "Hive Engine",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
+
+  embed.addFields([
+    dataField("Null Balance", nullBalance ? `${formatNumber(nullBalance.total, 0)} ${nullBalance.symbol}` : null),
+    dataField("Note", truncated ? "Hive Engine returned more balances than the RPC offset limit allows; ranked from the first 11,000 rows." : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
-function formatHiveEngineStaked(symbol: string, balances: HiveEngineBalance[], count: number, truncated: boolean): string {
+function formatHiveEngineStaked(token: HiveEngineToken, balances: HiveEngineBalance[], count: number, truncated: boolean): string | EmbedBuilder {
+  const symbol = token.symbol;
+  const metadata = parseTokenMetadata(token.metadata);
   const totalStake = balances.reduce((sum, balance) => sum + parseHiveEngineNumber(balance.stake), 0);
   if (totalStake === 0) return `Nobody has staked \`${symbol}\` yet.`;
 
@@ -1581,13 +1730,24 @@ function formatHiveEngineStaked(symbol: string, balances: HiveEngineBalance[], c
     .sort((a, b) => b.stake - a.stake)
     .slice(0, count);
 
-  return [
-    `**Top ${sorted.length} by Stake: ${symbol}**`,
-    ...sorted.map((balance, index) =>
+  const embed = banjoEmbed()
+    .setTitle(`Top ${sorted.length} by Stake: ${symbol}`)
+    .setThumbnail(normalizeTokenIconUrl(symbol, metadata.icon))
+    .setDescription(sorted.map((balance, index) =>
       `${index + 1}. [${balance.account}](${hiveEngineAccountUrl(balance.account, symbol)}) - \`${formatNumber(balance.stake, 0)} ${balance.symbol} POWER\` (${formatNumber((balance.stake / totalStake) * 100, 2)}%)`
-    ),
-    truncated ? "Note: Hive Engine returned more balances than the RPC offset limit allows; percentages use the first 11,000 rows." : null,
-  ].filter(Boolean).join("\n");
+    ).join("\n"))
+    .setFooter({
+      text: "Hive Engine",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
+
+  embed.addFields([
+    dataField("Total Stake", `${formatNumber(totalStake, 0)} ${symbol} POWER`),
+    dataField("Results", String(sorted.length)),
+    dataField("Note", truncated ? "Hive Engine returned more balances than the RPC offset limit allows; percentages use the first 11,000 rows." : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function hiveEngineAccountUrl(account: string, symbol: string): string {
@@ -1805,18 +1965,28 @@ function formatHiveEngineToken(
   return embed;
 }
 
-function formatHiveEngineNft(nft: HiveEngineNft): string {
+function formatHiveEngineNft(nft: HiveEngineNft): EmbedBuilder {
   const metadata = parseTokenMetadata(nft.metadata);
-  const lines = [
-    `**${nft.symbol}** issued by **@${nft.issuer ?? "unknown"}**`,
-    `https://he.dtools.dev/nfts/${encodeURIComponent(nft.symbol)}`,
-    nft.name ? `Name: ${nft.name}` : null,
-    nft.circulatingSupply ? `Circulating Supply: \`${formatNumber(Number.parseFloat(nft.circulatingSupply), 0)} ${nft.symbol}\`` : null,
-    metadata.desc ? truncateText(metadata.desc, 240) : null,
-    metadata.url ? `See: ${normalizeMetadataUrl(metadata.url)}` : null,
-  ];
+  const embed = banjoEmbed()
+    .setTitle(`${nft.symbol} issued by @${nft.issuer ?? "unknown"}`)
+    .setURL(`https://he.dtools.dev/nfts/${encodeURIComponent(nft.symbol)}`)
+    .setFooter({
+      text: "Hive Engine NFT",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
 
-  return lines.filter(Boolean).join("\n");
+  if (metadata.desc) embed.setDescription(truncateEmbedText(metadata.desc, 600));
+
+  embed.addFields([
+    dataField("Name", nft.name ?? null),
+    dataField(
+      "Circulating Supply",
+      nft.circulatingSupply ? `${formatNumber(Number.parseFloat(nft.circulatingSupply), 0)} ${nft.symbol}` : null,
+    ),
+    dataField("Metadata", metadata.url ? `[${nft.name ?? nft.symbol}](${normalizeMetadataUrl(metadata.url)})` : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function readOptionalIndex(value: string | undefined): number | string {
@@ -1827,16 +1997,142 @@ function readOptionalIndex(value: string | undefined): number | string {
   return Math.abs(index);
 }
 
-function formatNftShowroomArt(art: NftShowroomArt): string {
-  const lines = [
-    `**${truncateText(art.title, 80)} by @${art.artist}**`,
-    `https://nftshowroom.com/gallery/${encodeURIComponent(art.series)}?collection=true`,
-    art.collection ? `Collection: ${truncateText(art.collection, 80)}` : null,
-    art.note ? `Note: ${truncateText(art.note, 80)}` : null,
-    art.createdAt ? `Created: ${formatRelativeAge(parseHiveDate(art.createdAt))} ago (${formatUtc(parseHiveDate(art.createdAt))} UTC)` : null,
-  ];
+function formatNftShowroomResponse(art: NftShowroomArt, account: string | null, index: number) {
+  return {
+    embeds: [formatNftShowroomArt(art)],
+    components: renderNftShowroomComponents(account, index),
+  };
+}
 
-  return lines.filter(Boolean).join("\n");
+function formatNftShowroomArt(art: NftShowroomArt): EmbedBuilder {
+  const created = art.createdAt ? parseHiveDate(art.createdAt) : null;
+  const embed = banjoEmbed()
+    .setTitle(truncateEmbedText(art.title, 256))
+    .setURL(`https://nftshowroom.com/gallery/${encodeURIComponent(art.series)}?collection=true`)
+    .setFooter({ text: "NFT Showroom" });
+
+  if (art.description) embed.setDescription(truncateEmbedText(art.description, 600));
+  if (art.image) embed.setImage(art.image);
+  embed.setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(art.artist)}/avatar`);
+
+  embed.addFields([
+    dataField("Artist", `@${art.artist}`),
+    dataField("Collection", art.collection ? truncateEmbedText(art.collection, 80) : null),
+    dataField("Note", art.note ? truncateEmbedText(art.note, 80) : null),
+    dataField("Created", created ? `${formatRelativeAge(created)} ago (${formatUtc(created)} UTC)` : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function renderNftShowroomComponents(account: string | null, index: number): Array<ActionRowBuilder<ButtonBuilder>> {
+  const previousIndex = Math.max(0, index - 1);
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(nftsrButtonId("previous", account, previousIndex))
+        .setLabel("Previous")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(index === 0),
+      new ButtonBuilder()
+        .setCustomId(nftsrButtonId("next", account, index + 1))
+        .setLabel("Next")
+        .setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+}
+
+function nftsrButtonId(direction: "previous" | "next", account: string | null, index: number): string {
+  return [
+    nftsrButtonPrefix,
+    direction,
+    encodeURIComponent(account ?? nftsrNoAccount),
+    String(index),
+  ].join(":");
+}
+
+export async function handleNftShowroomInteraction(interaction: ButtonInteraction, config: AppConfig, logger: Logger): Promise<boolean> {
+  const request = parseNftShowroomButtonId(interaction.customId);
+  if (!request) return false;
+
+  await interaction.deferUpdate();
+
+  const hiveEngine = new HiveEngineRpcClient(config, logger);
+  const art = await hiveEngine.getNftShowroomArt(request.account, request.index);
+  if (!art) {
+    await interaction.followUp({ content: "Unable to find another NFT Showroom item.", ephemeral: true });
+    return true;
+  }
+  if (!art.published) {
+    await interaction.followUp({ content: "That NFT Showroom item is unpublished.", ephemeral: true });
+    return true;
+  }
+
+  await interaction.message.edit(formatNftShowroomResponse(art, request.account, request.index));
+  return true;
+}
+
+function parseNftShowroomButtonId(customId: string): { account: string | null; index: number } | null {
+  const [prefix, direction, accountValue, indexValue] = customId.split(":");
+  if (prefix !== nftsrButtonPrefix || (direction !== "previous" && direction !== "next") || !accountValue) return null;
+
+  const index = Number.parseInt(indexValue ?? "", 10);
+  if (!Number.isFinite(index) || index < 0) return null;
+
+  const decodedAccount = decodeURIComponent(accountValue);
+  return {
+    account: decodedAccount === nftsrNoAccount ? null : decodedAccount,
+    index,
+  };
+}
+
+export async function handleProposalInteraction(interaction: ButtonInteraction, config: AppConfig, logger: Logger): Promise<boolean> {
+  const request = parseProposalButtonId(interaction.customId);
+  if (!request) return false;
+
+  await interaction.deferUpdate();
+
+  const hive = new HiveRpcClient(config, logger);
+  const [chainConfig, globals, proposals] = await Promise.all([
+    hive.getConfig(),
+    hive.getDynamicGlobalProperties(),
+    hive.listProposals(),
+  ]);
+  const treasuryAccount = chainConfig.HIVE_TREASURY_ACCOUNT ?? "hive.fund";
+  const treasury = await hive.getAccount(treasuryAccount);
+  const proposalFundPercent = (chainConfig.HIVE_PROPOSAL_FUND_PERCENT_HF21 ?? 0) / 100_000;
+  const funding = calculateProposalFunding(proposals, treasuryAccount, parseAsset(treasury?.hbd_balance) * proposalFundPercent);
+  const basePerMvest = calculateHivePerMvest(globals.total_vesting_fund_hive, globals.total_vesting_shares) ?? 0;
+  const returnProposal = findReturnProposal(proposals, treasuryAccount);
+  const selected = request.ids
+    .map((id) => proposals.find((proposal) => proposalId(proposal) === id))
+    .filter((proposal): proposal is HiveProposal => Boolean(proposal));
+
+  if (selected.length === 0) {
+    await interaction.followUp({ content: "Unable to find those proposals anymore.", ephemeral: true });
+    return true;
+  }
+
+  await interaction.message.edit(await formatProposalResponse({
+    hive,
+    selected,
+    selectedIndex: Math.min(request.selectedIndex, selected.length - 1),
+    funding,
+    basePerMvest,
+    returnProposal,
+  }));
+  return true;
+}
+
+function parseProposalButtonId(customId: string): { selectedIndex: number; ids: number[] } | null {
+  const [prefix, selectedIndexValue, idsValue] = customId.split(":");
+  if (prefix !== proposalButtonPrefix || !idsValue) return null;
+
+  const selectedIndex = Number.parseInt(selectedIndexValue ?? "", 10);
+  const ids = idsValue.split(",").map((value) => Number.parseInt(value, 10)).filter(Number.isFinite);
+  if (!Number.isFinite(selectedIndex) || selectedIndex < 0 || ids.length === 0) return null;
+
+  return { selectedIndex, ids };
 }
 
 function formatScotTags(config: ScotConfigEntry[], symbols: string[]): string {
@@ -1898,24 +2194,30 @@ async function formatScotTokenHint(context: CommandContext, config: ScotConfigEn
   return null;
 }
 
-function formatCommunity(community: HiveCommunity): string {
+function formatCommunity(community: HiveCommunity): EmbedBuilder {
   const owner = community.team?.find((member) => member[1] === "owner")?.[0];
   const title = community.title ?? community.name;
-  const description = [community.about ? `**${community.about}**` : null, community.description ? truncateText(community.description, 600) : null]
+  const description = [community.about ? `**${community.about}**` : null, community.description ? truncateEmbedText(community.description, 600) : null]
     .filter(Boolean)
     .join("\n");
   const createdAt = community.created_at ? parseHiveDate(community.created_at.replace(" ", "T")) : null;
+  const embed = banjoEmbed()
+    .setTitle(title)
+    .setURL(`https://hive.blog/trending/${community.name}${community.title ? `#${slugify(community.title)}` : ""}`)
+    .setThumbnail(`https://images.hive.blog/u/${community.name}/avatar`)
+    .setFooter({ text: "Hivemind Communities", iconURL: HIVE_TOKEN_ICON_URL });
 
-  return [
-    `**${title}${owner ? ` created by @${owner}` : ""}**`,
-    `https://hive.blog/trending/${community.name}${community.title ? `#${slugify(community.title)}` : ""}`,
-    description || null,
-    typeof community.subscribers === "number" ? `Subscribers: **${formatInteger(community.subscribers)}**` : null,
-    typeof community.sum_pending === "number" ? `Pending Rewards: **$${formatNumber(community.sum_pending, 0)}**` : null,
-    typeof community.num_authors === "number" ? `Active Authors: **${formatInteger(community.num_authors)}**` : null,
-    createdAt ? `Created: ${formatRelativeAge(createdAt)} ago (${formatUtc(createdAt)} UTC)` : null,
-    `Avatar: https://images.hive.blog/u/${community.name}/avatar`,
-  ].filter(Boolean).join("\n");
+  if (description) embed.setDescription(description);
+
+  embed.addFields([
+    dataField("Owner", owner ? `@${owner}` : null),
+    dataField("Subscribers", typeof community.subscribers === "number" ? formatInteger(community.subscribers) : null),
+    dataField("Pending Rewards", typeof community.sum_pending === "number" ? `$${formatNumber(community.sum_pending, 0)}` : null),
+    dataField("Active Authors", typeof community.num_authors === "number" ? formatInteger(community.num_authors) : null),
+    dataField("Created", createdAt ? `${formatRelativeAge(createdAt)} ago (${formatUtc(createdAt)} UTC)` : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function parseSearchArgs(args: string[], now = new Date()): HiveSqlSearchOptions | string {
@@ -1987,7 +2289,7 @@ function parseSearchDate(value: string, endOfDay: boolean): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function formatSearchResult(options: HiveSqlSearchOptions, result: HiveSqlSearchResult): string {
+async function formatSearchResult(options: HiveSqlSearchOptions, result: HiveSqlSearchResult, hive: HiveApi) {
   const keywords = options.keywords.join(" ");
   const subject = keywords || options.tags.map((tag) => `tag:${tag}`).join(" ");
   const tags = [
@@ -2000,8 +2302,143 @@ function formatSearchResult(options: HiveSqlSearchOptions, result: HiveSqlSearch
   if (result.authorCount > 500) return `Too many authors in \`${subject}\` timeframe (${result.authorCount}). Try a more narrow timeframe.`;
   if (result.total > 80) return `Too many results for \`${subject}\` (${result.total})${tags}.`;
 
-  const links = result.comments.map(searchCommentLink).join(" ");
-  return `Authors writing \`${subject}\`${tags} ${timeframe} (${result.total}):\n\n${links}`;
+  const cacheId = rememberSearchResult(options, result);
+  return formatSearchResultPage(cacheId, 0, hive);
+}
+
+function rememberSearchResult(options: HiveSqlSearchOptions, result: HiveSqlSearchResult): string {
+  const now = Date.now();
+  for (const [cacheId, cached] of searchResultCache.entries()) {
+    if (now - cached.createdAt > 30 * 60 * 1000) searchResultCache.delete(cacheId);
+  }
+
+  const cacheId = (++searchResultCacheCounter).toString(36);
+  searchResultCache.set(cacheId, { options, result, posts: new Map(), createdAt: now });
+  return cacheId;
+}
+
+async function formatSearchResultPage(cacheId: string, selectedIndex: number, hive: HiveApi) {
+  const cached = searchResultCache.get(cacheId);
+  if (!cached) return asEmbedResponse(banjoEmbed().setTitle("Hive Search Results").setDescription("That search result cache expired."));
+  if (cached.result.comments.length === 0) return asEmbedResponse(banjoEmbed().setTitle("Hive Search Results").setDescription("No cached search results."));
+
+  const index = Math.max(0, Math.min(selectedIndex, cached.result.comments.length - 1));
+  const post = await hydrateSearchPost(cached, index, hive);
+  return {
+    embeds: [formatSearchResultEmbed(cached.options, cached.result, index, post)],
+    components: renderSearchResultComponents(cacheId, cached.result.comments.length, index),
+  };
+}
+
+async function hydrateSearchPost(
+  cached: { result: HiveSqlSearchResult; posts: Map<string, HivePost | null> },
+  selectedIndex: number,
+  hive: HiveApi,
+): Promise<HivePost | null> {
+  const comment = cached.result.comments[selectedIndex];
+  if (!comment) return null;
+
+  const key = `${comment.author}/${comment.permlink}`;
+  if (cached.posts.has(key)) return cached.posts.get(key) ?? null;
+
+  const post = await hive.getPostCreation(comment.author, comment.permlink);
+  cached.posts.set(key, post);
+  return post;
+}
+
+function formatSearchResultEmbed(options: HiveSqlSearchOptions, result: HiveSqlSearchResult, selectedIndex: number, post: HivePost | null): EmbedBuilder {
+  const comment = result.comments[selectedIndex];
+  if (!comment) {
+    return banjoEmbed()
+      .setTitle("Hive Search Results")
+      .setDescription("No cached search results.")
+      .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+  }
+  const keywords = options.keywords.join(" ");
+  const subject = keywords || options.tags.map((tag) => `tag:${tag}`).join(" ");
+  const timeframe = searchTimeframe(options);
+  const resultNumber = selectedIndex + 1;
+  const postPreview = proposalPostPreview(post);
+  const title = post?.title || comment.title || `@${comment.author}/${comment.permlink}`;
+  const embed = banjoEmbed()
+    .setTitle(truncateEmbedText(title, 256))
+    .setURL(searchCommentUrl(comment))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(comment.author)}/avatar`)
+    .setDescription([
+      searchCommentLink(comment),
+      postPreview.description,
+    ].filter(Boolean).join("\n"))
+    .setFooter({ text: `${formatInteger(result.total)} results by ${pluralize(result.authorCount, "author")}`, iconURL: HIVE_TOKEN_ICON_URL });
+
+  if (postPreview.image) embed.setImage(postPreview.image);
+
+  embed.addFields([
+    dataField("Result", `${resultNumber} / ${formatInteger(result.total)}`),
+    dataField("Author", `@${comment.author}`),
+    dataField("Created", comment.created ? `${formatRelativeAge(comment.created)} ago (${formatUtc(comment.created)} UTC)` : null),
+    dataField("Query", subject),
+    dataField("Tags", formatSearchTags(options)),
+    dataField("Timeframe", timeframe),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function renderSearchResultComponents(cacheId: string, resultCount: number, selectedIndex: number): Array<ActionRowBuilder<ButtonBuilder>> {
+  if (resultCount <= 1) return [];
+
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(searchButtonId(cacheId, selectedIndex - 1))
+        .setLabel("Previous")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedIndex === 0),
+      new ButtonBuilder()
+        .setCustomId(searchButtonId(cacheId, selectedIndex + 1))
+        .setLabel("Next")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedIndex >= resultCount - 1),
+    ),
+  ];
+}
+
+function searchButtonId(cacheId: string, selectedIndex: number): string {
+  return [searchButtonPrefix, cacheId, Math.max(0, selectedIndex)].join(":");
+}
+
+export async function handleSearchInteraction(interaction: ButtonInteraction, config: AppConfig, logger: Logger): Promise<boolean> {
+  const request = parseSearchButtonId(interaction.customId);
+  if (!request) return false;
+
+  await interaction.deferUpdate();
+
+  if (!searchResultCache.has(request.cacheId)) {
+    await interaction.followUp({ content: "That search result cache expired. Run the search again.", ephemeral: true });
+    return true;
+  }
+
+  await interaction.message.edit(await formatSearchResultPage(request.cacheId, request.selectedIndex, new HiveRpcClient(config, logger)));
+  return true;
+}
+
+function parseSearchButtonId(customId: string): { cacheId: string; selectedIndex: number } | null {
+  const [prefix, cacheId, selectedIndexValue] = customId.split(":");
+  if (prefix !== searchButtonPrefix || !cacheId) return null;
+
+  const selectedIndex = Number.parseInt(selectedIndexValue ?? "", 10);
+  if (!Number.isFinite(selectedIndex) || selectedIndex < 0) return null;
+
+  return { cacheId, selectedIndex };
+}
+
+function formatSearchTags(options: HiveSqlSearchOptions): string | null {
+  const tags = [
+    options.tags.length > 0 ? `in ${options.tags.join(", ")}` : null,
+    options.excludedTags.length > 0 ? `not in ${options.excludedTags.join(", ")}` : null,
+  ].filter(Boolean);
+
+  return tags.length > 0 ? tags.join("; ") : null;
 }
 
 function searchTimeframe(options: HiveSqlSearchOptions): string {
@@ -2015,30 +2452,153 @@ function searchTimeframe(options: HiveSqlSearchOptions): string {
 }
 
 function searchCommentLink(comment: HiveSqlSearchComment): string {
-  return `[${comment.author}](https://hive.blog/@${comment.author}/${comment.permlink})`;
+  return `[${comment.author}/${comment.permlink}](${searchCommentUrl(comment)})`;
 }
 
-function formatCalculatedReward(post: HivePost, rewardBalance: string, feedBase: string, feedQuote: string): string {
+function searchCommentUrl(comment: HiveSqlSearchComment): string {
+  return `https://hive.blog/@${comment.author}/${comment.permlink}`;
+}
+
+type CalculatedRewardTarget = {
+  ref: { author: string; permlink: string };
+  unfurl: boolean;
+};
+
+async function resolveCalculatedRewardTarget(context: CommandContext, input: string | undefined): Promise<CalculatedRewardTarget | string> {
+  if (!input || input === "^") {
+    const ref = await findFollowUpPostRef(context.message);
+    return ref ? { ref, unfurl: false } : "Sorry, I wasn't paying attention.";
+  }
+
+  const normalizedInput = stripDiscordUrlSuppression(input);
+  const ref = parsePostRef(normalizedInput);
+  if (!ref) return "Usage: `$calcreward <url-or-@author/permlink>`";
+
+  return {
+    ref,
+    unfurl: !isUrl(normalizedInput),
+  };
+}
+
+async function findFollowUpPostRef(message: Message): Promise<{ author: string; permlink: string } | null> {
+  const referencedMessage = typeof message.fetchReference === "function" ? await message.fetchReference().catch(() => null) : null;
+  const referencedRef = referencedMessage ? findPostUrlRefInText(referencedMessage.content) : null;
+  if (referencedRef) return referencedRef;
+
+  if (!message.channel || !("messages" in message.channel)) return null;
+
+  const messages = await message.channel.messages.fetch({ limit: 20, before: message.id }).catch(() => null);
+  if (!messages) return null;
+
+  const recentMessages = [...messages.values()].sort((left, right) => right.createdTimestamp - left.createdTimestamp);
+  for (const recentMessage of recentMessages) {
+    const ref = findPostUrlRefInText(recentMessage.content);
+    if (ref) return ref;
+  }
+
+  return null;
+}
+
+function findPostUrlRefInText(content: string): { author: string; permlink: string } | null {
+  const urls = content.match(/https?:\/\/[^\s<>()]+/gi) ?? [];
+  for (const url of urls) {
+    const ref = parsePostRef(url.replace(/[),.?!]+$/g, ""));
+    if (ref) return ref;
+  }
+
+  return null;
+}
+
+function isUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function stripDiscordUrlSuppression(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+}
+
+function calculatedRewardValues(post: HivePost, rewardBalance: string, feedBase: string, feedQuote: string): { pendingPayout: number; poolRatio: number | null } {
   const pendingPayout = parseHiveAssetAmount(post.pending_payout_value);
   const rewardPoolHive = parseHiveAssetAmount(rewardBalance);
   const hbdPerHive = calculateHbdPerMvest(1, feedBase, feedQuote);
   const rewardPoolHbd = hbdPerHive === null ? null : rewardPoolHive * hbdPerHive;
-  const poolRatio = rewardPoolHbd && rewardPoolHbd > 0 && pendingPayout > 0
-    ? ` (${formatNumber((pendingPayout / rewardPoolHbd) * 100, 3)}% the size of reward pool).`
-    : "";
+  const poolRatio = rewardPoolHbd && rewardPoolHbd > 0 && pendingPayout > 0 ? (pendingPayout / rewardPoolHbd) * 100 : null;
 
-  return `Total Pending Payout: $${formatNumber(pendingPayout, 3)}${poolRatio}`;
+  return { pendingPayout, poolRatio };
 }
 
-function formatPromotedSummary(summary: HiveSqlPromotedSummary): string {
-  const totals = summary.totals.length > 0
-    ? summary.totals.map((total) => `\`${formatNumber(total.total, 3)} ${total.symbol}\``).join("; ")
-    : "`0.000 HBD`";
-  const posts = summary.posts.length > 0
-    ? `\n${summary.posts.map((post, index) => `${index + 1}. [${truncateText(post.title || `@${post.author}/${post.permlink}`, 80)}](https://hive.blog/@${post.author}/${post.permlink}) - \`${formatNumber(post.promoted, 3)} ${post.symbol}\``).join("\n")}`
-    : "";
+function formatCalculatedRewardText(post: HivePost, rewardBalance: string, feedBase: string, feedQuote: string): string {
+  const { pendingPayout, poolRatio } = calculatedRewardValues(post, rewardBalance, feedBase, feedQuote);
+  const ratioText = poolRatio === null ? "" : ` (${formatNumber(poolRatio, 3)}% the size of reward pool)`;
+  return `Total Pending Payout: $${formatNumber(pendingPayout, 3)}${ratioText}.`;
+}
 
-  return `${formatInteger(summary.count)} promoted posts ${summary.timeframe}: ${totals}${posts}`;
+function formatCalculatedRewardEmbed(post: HivePost, rewardBalance: string, feedBase: string, feedQuote: string): EmbedBuilder {
+  const { pendingPayout, poolRatio } = calculatedRewardValues(post, rewardBalance, feedBase, feedQuote);
+  const postPreview = proposalPostPreview(post);
+  const url = canonicalPostUrl(post);
+  const embed = banjoEmbed()
+    .setTitle(truncateEmbedText(post.title || `@${post.author}/${post.permlink}`, 256))
+    .setURL(url)
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(post.author)}/avatar`)
+    .setDescription([
+      `[${post.author}/${post.permlink}](${url})`,
+      postPreview.description,
+    ].filter(Boolean).join("\n"))
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  if (postPreview.image) embed.setImage(postPreview.image);
+
+  embed.addFields([
+    dataField("Pending Payout", `$${formatNumber(pendingPayout, 3)}`),
+    dataField("Reward Pool Ratio", poolRatio === null ? null : `${formatNumber(poolRatio, 3)}%`),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function formatPostAge(post: HivePost, createdAt: Date): EmbedBuilder {
+  const title = post.title || `@${post.author}/${post.permlink}`;
+  return banjoEmbed()
+    .setTitle(truncateEmbedText(title, 256))
+    .setURL(canonicalPostUrl(post))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(post.author)}/avatar`)
+    .addFields([
+      dataField("Author", accountMarkdownLink(post.author)),
+      dataField("Created", `${formatUtc(createdAt)} UTC`),
+      dataField("Age", `${formatRelativeAge(createdAt)} ago`),
+    ].filter((field): field is NonNullable<typeof field> => field !== null))
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+}
+
+function formatPromotedSummaries(yesterday: HiveSqlPromotedSummary, today: HiveSqlPromotedSummary): EmbedBuilder {
+  const promotedPosts = [...yesterday.posts, ...today.posts];
+  const embed = banjoEmbed()
+    .setTitle("Promoted Posts")
+    .setDescription(promotedPosts.length > 0
+      ? promotedPosts.map((post, index) => `${index + 1}. ${promotedPostLink(post)} - \`${formatNumber(post.promoted, 3)} ${post.symbol}\``).join("\n")
+      : "No promoted posts today or yesterday.")
+    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Yesterday", `${formatInteger(yesterday.count)} posts / ${formatPromotedTotals(yesterday)}`),
+    dataField("Today", `${formatInteger(today.count)} posts / ${formatPromotedTotals(today)}`),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
+function promotedPostLink(post: { author: string; permlink: string; title: string | null }): string {
+  return `[${truncateEmbedText(post.title || `@${post.author}/${post.permlink}`, 80)}](https://hive.blog/@${post.author}/${post.permlink})`;
+}
+
+function formatPromotedTotals(summary: HiveSqlPromotedSummary): string {
+  const totals = summary.totals.length > 0
+    ? summary.totals.map((total) => `${formatNumber(total.total, 3)} ${total.symbol}`).join("; ")
+    : "0.000 HBD";
+
+  return totals;
 }
 
 function readDistributionDays(value: string | undefined): number | string {
@@ -2048,7 +2608,7 @@ function readDistributionDays(value: string | undefined): number | string {
   return Math.min(days, 3650);
 }
 
-function formatDistribution(summary: HiveSqlDistributionSummary, totalVestingFundHive: string, totalVestingShares: string, feedBase: string, feedQuote: string): string {
+function formatDistribution(summary: HiveSqlDistributionSummary, totalVestingFundHive: string, totalVestingShares: string, feedBase: string, feedQuote: string): string | EmbedBuilder {
   if (summary.activeAccountCount === 0) return "No match.";
 
   const hbdPerMvest = calculateHbdPerMvest(calculateHivePerMvest(totalVestingFundHive, totalVestingShares), feedBase, feedQuote) ?? 0;
@@ -2064,16 +2624,24 @@ function formatDistribution(summary: HiveSqlDistributionSummary, totalVestingFun
   });
   const inactiveStakePercent = totalStake > 0 ? (summary.inactiveVestingShares / totalStake) * 100 : 0;
 
-  return [
-    `Active since ${formatNumber(summary.daysAgo, summary.daysAgo % 1 === 0 ? 0 : 1)} days ago:`,
-    "```markdown",
-    "|     $     |   MV  |   level   |   accts  | accts % | stake % |",
-    "|-----------|-------|-----------|----------|---------|---------|",
-    ...rows,
-    "```",
-    `Active accounts: \`${formatInteger(summary.activeAccountCount)} / ${formatInteger(totalAccounts)}\``,
-    `Inactive stake: \`${formatNumber(inactiveStakePercent, 2)}%\``,
-  ].join("\n");
+  const embed = banjoEmbed()
+    .setTitle("Hive Stake Distribution")
+    .setDescription([
+      `Active since ${formatNumber(summary.daysAgo, summary.daysAgo % 1 === 0 ? 0 : 1)} days ago:`,
+      "```markdown",
+      "|     $     |   MV  |   level   |   accts  | accts % | stake % |",
+      "|-----------|-------|-----------|----------|---------|---------|",
+      ...rows,
+      "```",
+    ].join("\n"))
+    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Active Accounts", `${formatInteger(summary.activeAccountCount)} / ${formatInteger(totalAccounts)}`),
+    dataField("Inactive Stake", `${formatNumber(inactiveStakePercent, 2)}%`),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function formatDistributionRow(bucket: HiveSqlDistributionBucket, hbdPerMvest: number, activeAccounts: number, totalStake: number): string {
@@ -2125,38 +2693,68 @@ function readFearGreedDays(value: string | undefined): number | string {
   return Math.abs(days);
 }
 
-function formatFearGreed(index: FearGreedIndex, daysAgo: number): string {
+function formatFearGreed(index: FearGreedIndex, daysAgo: number): EmbedBuilder {
   const imageDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
   const imageSlug = [
     imageDate.getUTCFullYear(),
     imageDate.getUTCMonth() + 1,
     imageDate.getUTCDate(),
   ].join("-");
-  const lines = [
-    `**${index.name}**`,
-    "https://alternative.me/crypto/fear-and-greed-index/",
-    `Image: https://alternative.me/images/fng/crypto-fear-and-greed-index-${imageSlug}.png`,
-    ...index.entries.map((entry) => `${formatRelativeAge(new Date(entry.timestamp * 1000))} ago: **${entry.value} - ${entry.classification}**`),
-  ];
   const nextUpdate = index.entries.find((entry) => entry.timeUntilUpdate !== null)?.timeUntilUpdate;
-  if (typeof nextUpdate === "number") lines.push(`Next update in ${formatDuration(nextUpdate)}.`);
+  const embed = banjoEmbed()
+    .setTitle(index.name)
+    .setURL("https://alternative.me/crypto/fear-and-greed-index/")
+    .setDescription(formatFearGreedPairs(index, nextUpdate))
+    .setImage(`https://alternative.me/images/fng/crypto-fear-and-greed-index-${imageSlug}.png`)
+    .setFooter({ text: "Alternative.me" });
 
-  return lines.join("\n");
+  return embed;
+}
+
+function formatFearGreedPairs(index: FearGreedIndex, nextUpdate: number | null | undefined): string {
+  const today = index.entries[0];
+  const yesterday = index.entries[1];
+  const previous = index.entries[2];
+  const rows = [
+    ["Yesterday", "Today", "Previous Entry", "Next Update"],
+    [
+      yesterday ? formatFearGreedEntry(yesterday) : "n/a",
+      today ? formatFearGreedEntry(today) : "n/a",
+      previous ? formatFearGreedEntry(previous) : "n/a",
+      typeof nextUpdate === "number" ? `in ${formatDuration(nextUpdate)}` : "n/a",
+    ],
+  ];
+  const widths = rows[0]?.map((_, index) => Math.max(...rows.map((row) => row[index]?.length ?? 0))) ?? [];
+  return [
+    "```",
+    ...rows.map((row) => row.map((value, index) => value.padEnd(widths[index] ?? 0)).join("  ").trimEnd()),
+    "```",
+  ].join("\n");
+}
+
+function formatFearGreedEntry(entry: FearGreedIndex["entries"][number]): string {
+  return `${entry.value} - ${entry.classification}`;
 }
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-function formatBadges(badges: HiveSqlBadge[], args: string[]): string {
-  const title = args.length > 0 ? `**Latest Badges matching: ${args.join(" ")}**` : "**Latest Badges**";
-  const lines = badges.map((badge) => {
+function formatBadges(badges: HiveSqlBadge[], args: string[]): EmbedBuilder {
+  const visibleBadges = badges.slice(0, 15);
+  const lines = visibleBadges.map((badge) => {
     const profile = badgeProfile(badge);
     const name = profile.name ?? badge.name;
     return `[${name}](https://peakd.com/b/${badge.name}#${slugify(name)}) by @${badge.recoveryAccount}`;
   });
+  const footer = badges.length === visibleBadges.length
+    ? `${badges.length} ${badges.length === 1 ? "result" : "results"}`
+    : `Showing ${visibleBadges.length} of ${badges.length} results`;
 
-  return [title, ...lines].join("\n");
+  return banjoEmbed()
+    .setTitle(args.length > 0 ? `Latest Badges matching: ${args.join(" ")}` : "Latest Badges")
+    .setDescription(truncateEmbedText(lines.join("\n"), 4000))
+    .setFooter({ text: footer });
 }
 
 async function hydrateBadges(context: CommandContext, badges: HiveSqlBadge[]): Promise<HiveSqlBadge[]> {
@@ -2185,20 +2783,26 @@ function mergeBadgeAccount(badge: HiveSqlBadge, account: HiveAccount | undefined
   };
 }
 
-function formatBadge(badge: HiveSqlBadge, stats: HiveSqlBadgeStats): string {
+function formatBadge(badge: HiveSqlBadge, stats: HiveSqlBadgeStats): EmbedBuilder {
   const profile = badgeProfile(badge);
   const name = profile.name ?? badge.name;
   const created = badge.created ? new Date(badge.created) : null;
+  const embed = banjoEmbed()
+    .setTitle(name)
+    .setURL(`https://peakd.com/b/${badge.name}#${slugify(name)}`)
+    .setThumbnail(`https://images.hive.blog/u/${badge.name}/avatar`)
+    .setFooter({ text: "PeakD Badge" });
 
-  return [
-    `**${name} created by @${badge.recoveryAccount}**`,
-    `https://peakd.com/b/${badge.name}#${slugify(name)}`,
-    profile.about ? truncateText(profile.about, 600) : null,
-    `Recipients: **${formatInteger(stats.recipients)}**`,
-    `Subscribers: **${formatInteger(stats.subscribers)}**`,
-    created ? `Created: ${formatRelativeAge(created)} ago (${formatUtc(created)} UTC)` : null,
-    `Avatar: https://images.hive.blog/u/${badge.name}/avatar`,
-  ].filter(Boolean).join("\n");
+  if (profile.about) embed.setDescription(truncateEmbedText(profile.about, 600));
+
+  embed.addFields([
+    dataField("Creator", `@${badge.recoveryAccount}`),
+    dataField("Recipients", formatInteger(stats.recipients)),
+    dataField("Subscribers", formatInteger(stats.subscribers)),
+    dataField("Created", created ? `${formatRelativeAge(created)} ago (${formatUtc(created)} UTC)` : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function badgeProfile(badge: HiveSqlBadge): { name?: string; about?: string } {
@@ -2231,13 +2835,15 @@ function readTt2xLimit(value: string | undefined): number | string {
 }
 
 function formatTt2x(
-  symbol: string,
+  token: HiveEngineToken,
   limit: number,
   discussions: ScotDiscussion[],
   trade: HiveEngineTrade,
   buyBook: HiveEngineBuyOrder[],
   hiveUsdPrice: number | null,
-): string {
+): EmbedBuilder {
+  const symbol = token.symbol;
+  const metadata = parseTokenMetadata(token.metadata);
   const precision = discussions.find((discussion) => typeof discussion.precision === "number")?.precision ?? 3;
   const pendingPayouts = discussions.map((discussion) => {
     const pending = typeof discussion.pending_token === "number" ? discussion.pending_token : 0;
@@ -2252,17 +2858,41 @@ function formatTt2x(
   const yieldResult = calculateTt2xYield(sumPendingPayout, buyBook);
   const change = price > 0 ? -(100 * ((price - yieldResult.priceAtDepth) / price)) : 0;
 
-  return [
-    `**Top ${limit} Trending to Exchange: ${symbol}**`,
-    `https://hive-engine.com/?p=history&t=${encodeURIComponent(symbol)}&utm_source=banjo`,
-    `Trade: https://hive-engine.com/?p=market&t=${encodeURIComponent(symbol)}&utm_source=banjo`,
-    `Last Price: \`${formatNumber(price, 3)} HIVE${usdPrice === null ? "" : ` / $${formatNumber(usdPrice, 6)}`}\`${trade.timestamp ? ` (${formatRelativeTime(new Date(trade.timestamp * 1000))})` : ""}`,
-    `Average Pending Payout: \`${formatNumber(averagePendingPayout, precision)} ${symbol}\` / \`${formatNumber(price * averagePendingPayout, 3)} HIVE\`${usdPrice === null ? "" : ` / \`$${formatNumber(usdPrice * averagePendingPayout, 6)}\``} (${pluralize(uniqueAuthors, "unique author")})`,
-    `Sum of Top ${limit} Pending Payout: \`${formatNumber(sumPendingPayout, precision)} ${symbol}\` / \`${formatNumber(price * sumPendingPayout, 3)} HIVE\`${usdPrice === null ? "" : ` / \`$${formatNumber(usdPrice * sumPendingPayout, 6)}\``}`,
-    `Actual Yield: \`${formatNumber(sumPendingPayout, precision)} ${symbol}\` would sell for \`${formatNumber(yieldResult.hive, 3)} HIVE\`${hiveUsdPrice === null ? "" : ` / \`$${formatNumber(hiveUsdPrice * yieldResult.hive, 6)}\``}`,
-    `Price at Final Yield: \`${formatNumber(yieldResult.priceAtDepth, precision)} HIVE\`${hiveUsdPrice === null ? "" : ` / \`$${formatNumber(hiveUsdPrice * yieldResult.priceAtDepth, 6)}\``}`,
-    `Change at Final Yield: \`${formatSignedPercent(change)}\``,
-  ].join("\n");
+  const embed = banjoEmbed()
+    .setTitle(`Top ${limit} Trending to Exchange: ${symbol}`)
+    .setURL(`https://hive-engine.com/?p=history&t=${encodeURIComponent(symbol)}&utm_source=banjo`)
+    .setThumbnail(normalizeTokenIconUrl(symbol, metadata.icon))
+    .setDescription(`[Trade ${symbol}](https://hive-engine.com/?p=market&t=${encodeURIComponent(symbol)}&utm_source=banjo)`)
+    .setFooter({
+      text: "SCOT + Hive Engine",
+      iconURL: "https://hive-engine.com/images/hive_engine.png",
+    });
+
+  embed.addFields([
+    dataField(
+      "Last Price",
+      `${formatNumber(price, 3)} HIVE${usdPrice === null ? "" : ` / $${formatNumber(usdPrice, 6)}`}${trade.timestamp ? ` (${formatRelativeTime(new Date(trade.timestamp * 1000))})` : ""}`,
+    ),
+    dataField(
+      "Average Pending Payout",
+      `${formatNumber(averagePendingPayout, precision)} ${symbol} / ${formatNumber(price * averagePendingPayout, 3)} HIVE${usdPrice === null ? "" : ` / $${formatNumber(usdPrice * averagePendingPayout, 6)}`} (${pluralize(uniqueAuthors, "unique author")})`,
+      false,
+    ),
+    dataField(
+      `Sum of Top ${limit} Pending Payout`,
+      `${formatNumber(sumPendingPayout, precision)} ${symbol} / ${formatNumber(price * sumPendingPayout, 3)} HIVE${usdPrice === null ? "" : ` / $${formatNumber(usdPrice * sumPendingPayout, 6)}`}`,
+      false,
+    ),
+    dataField(
+      "Actual Yield",
+      `${formatNumber(sumPendingPayout, precision)} ${symbol} would sell for ${formatNumber(yieldResult.hive, 3)} HIVE${hiveUsdPrice === null ? "" : ` / $${formatNumber(hiveUsdPrice * yieldResult.hive, 6)}`}`,
+      false,
+    ),
+    dataField("Price at Final Yield", `${formatNumber(yieldResult.priceAtDepth, precision)} HIVE${hiveUsdPrice === null ? "" : ` / $${formatNumber(hiveUsdPrice * yieldResult.priceAtDepth, 6)}`}`),
+    dataField("Change at Final Yield", formatSignedPercent(change)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function calculateTt2xYield(sumPendingPayout: number, buyBook: HiveEngineBuyOrder[]): { hive: number; priceAtDepth: number } {
@@ -2398,8 +3028,18 @@ function formatApproval(
     };
   }>,
   treasuryAccount: string,
-): string {
+): EmbedBuilder {
   const witnessVotes = readWitnessVotes(account.witness_votes);
+  const embed = banjoEmbed()
+    .setTitle(`Approved by ${account.name}`)
+    .setURL(`https://hiveblocks.com/@${account.name}`)
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(account.name)}/avatar`)
+    .setFooter({ text: "Hive governance", iconURL: HIVE_TOKEN_ICON_URL });
+
+  if (account.proxy) {
+    return embed.setDescription(`Proxied to: **${account.proxy}**`);
+  }
+
   const active = new Map<string, number[]>();
   const inactive = new Map<string, number[]>();
   let activeDailyPay = 0;
@@ -2421,28 +3061,40 @@ function formatApproval(
     }
   }
 
-  const lines = [
-    `**Approved by: ${account.name}**`,
-    `https://hiveblocks.com/@${account.name}`,
-    witnessVotes.length > 0
-      ? `Witnesses (total: ${witnessVotes.length}): ${truncateText(witnessVotes.join(", "), 500)}`
-      : "Witnesses: None",
-  ];
+  embed.addFields({
+    name: `Witnesses (${witnessVotes.length})`,
+    value: witnessVotes.length > 0 ? truncateEmbedText(witnessVotes.join(", "), 1024) : "None",
+    inline: false,
+  });
 
   const activeCount = countProposalIds(active);
   if (activeCount > 0) {
-    lines.push(`Proposals (total: ${activeCount}): ${formatProposalGroups(active)}`);
-    lines.push(`Proposal Pay Approved: ${formatNumber(activeDailyPay, 3)} HBD (daily)`);
+    embed.addFields(
+      {
+        name: `Proposals (${activeCount})`,
+        value: formatProposalGroups(active),
+        inline: false,
+      },
+      {
+        name: "Proposal Pay Approved",
+        value: `${formatNumber(activeDailyPay, 3)} HBD daily`,
+        inline: true,
+      },
+    );
   } else {
-    lines.push("Proposals: None");
+    embed.addFields({ name: "Proposals", value: "None", inline: false });
   }
 
   const inactiveCount = countProposalIds(inactive);
   if (inactiveCount > 0) {
-    lines.push(`Upcoming Proposals (total: ${inactiveCount}): ${formatProposalGroups(inactive)}`);
+    embed.addFields({
+      name: `Upcoming Proposals (${inactiveCount})`,
+      value: formatProposalGroups(inactive),
+      inline: false,
+    });
   }
 
-  return lines.join("\n");
+  return embed;
 }
 
 function readWitnessVotes(value: string[] | string | undefined): string[] {
@@ -2474,6 +3126,34 @@ function countProposalIds(groups: Map<string, number[]>): number {
 
 function formatProposalGroups(groups: Map<string, number[]>): string {
   return truncateText([...groups.entries()].map(([receiver, ids]) => `${receiver} (${ids.join(", ")})`).join(", "), 500);
+}
+
+async function formatProposalResponse(options: {
+  hive: HiveApi;
+  selected: HiveProposal[];
+  selectedIndex: number;
+  funding: Map<number, number>;
+  basePerMvest: number;
+  returnProposal: HiveProposal | null;
+}) {
+  const proposal = options.selected[options.selectedIndex];
+  if (!proposal) return { embeds: [] };
+
+  const [voters, post] = await Promise.all([
+    options.hive.listProposalVotesByProposal(proposalId(proposal)),
+    options.hive.getPostCreation(proposal.creator, proposal.permlink),
+  ]);
+
+  return {
+    embeds: [formatProposal(proposal, {
+      approvedDailyPay: options.funding.get(proposalId(proposal)) ?? 0,
+      basePerMvest: options.basePerMvest,
+      returnProposal: options.returnProposal,
+      voterCount: new Set(voters.map((vote) => vote.voter)).size,
+      post,
+    })],
+    components: renderProposalComponents(options.selected, options.selectedIndex),
+  };
 }
 
 function parseConsensusArgs(args: string[]): { chain: string | undefined; top: number } {
@@ -2538,12 +3218,33 @@ function normalizeTopKind(value: string): HiveSqlTopKind | null {
   }
 }
 
-function formatTopPost(options: HiveSqlTopPostOptions, post: HiveSqlTopPost | null): string {
+function formatTopPost(options: HiveSqlTopPostOptions, post: HiveSqlTopPost | null, hydratedPost: HivePost | null): string | EmbedBuilder {
   const keywordText = options.kind === "reply" ? ` with \`${options.keywords.join(" ")}\`` : "";
   const title = `Top ${options.kind}${keywordText} since ${formatRelativeAge(options.since)} ago ...`;
   if (!post) return `${title}\nNo result.`;
 
-  return `${title}\n${topPostUrl(options.kind, post)}`;
+  const postPreview = proposalPostPreview(hydratedPost);
+  const postTitle = hydratedPost?.title || post.title || `@${post.author}/${post.permlink}`;
+  const embed = banjoEmbed()
+    .setTitle(truncateEmbedText(postTitle, 256))
+    .setURL(topPostUrl(options.kind, post))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(post.author)}/avatar`)
+    .setDescription([
+      `[${post.author}/${post.permlink}](${topPostUrl(options.kind, post)})`,
+      postPreview.description,
+    ].filter(Boolean).join("\n"))
+    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+
+  if (postPreview.image) embed.setImage(postPreview.image);
+
+  embed.addFields([
+    dataField("Kind", options.kind),
+    dataField("Since", `${formatRelativeAge(options.since)} ago`),
+    dataField("Score", post.score === null ? null : formatNumber(post.score, 0)),
+    dataField("Keywords", options.keywords.length > 0 ? options.keywords.join(" ") : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function readAppLimit(value: string | undefined): number | string {
@@ -2555,20 +3256,22 @@ function readAppLimit(value: string | undefined): number | string {
   return Math.min(25, limit);
 }
 
-function formatAppPayouts(apps: HiveSqlAppPayout[], since: Date, limit: number): string {
-  const caption = `Top ${limit} ${limit === 1 ? "app" : "apps"} paid since ${formatRelativeAge(since)} ago ...`;
+function formatAppPayouts(apps: HiveSqlAppPayout[], since: Date, limit: number): EmbedBuilder {
   const rows = apps.length > 0
-    ? apps.map((app) => `| ${truncateText(app.app, 21).padEnd(21)} | ${formatNumber(app.payout, 0).padStart(13)} |`)
-    : ["| unknown               |             0 |"];
+    ? apps.map((app, index) => `${index + 1}. \`${truncateEmbedText(app.app, 80)}\` - ${formatNumber(app.payout, 0)} HBD`)
+    : ["1. `unknown` - 0 HBD"];
 
-  return [
-    caption,
-    "```markdown",
-    "|          App          | Payout in HBD |",
-    "|-----------------------|---------------|",
-    ...rows,
-    "```",
-  ].join("\n");
+  const embed = banjoEmbed()
+    .setTitle(`Top ${limit} ${limit === 1 ? "App" : "Apps"} Paid`)
+    .setDescription(rows.join("\n"))
+    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Since", `${formatRelativeAge(since)} ago`),
+    dataField("Results", String(apps.length)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function formatConsensus(participationCount: number | undefined, witnesses: HiveWitness[]): string {
@@ -2649,8 +3352,9 @@ function formatProposal(
     basePerMvest: number;
     returnProposal: HiveProposal | null;
     voterCount: number;
+    post: HivePost | null;
   },
-): string {
+): EmbedBuilder {
   const startDate = parseHiveDate(proposal.start_date);
   const endDate = parseHiveDate(proposal.end_date);
   const days = Math.max(0, Math.floor((endDate.getTime() - startDate.getTime()) / (24 * 60 * 60 * 1000)));
@@ -2666,28 +3370,131 @@ function formatProposal(
     : votesApproved && context.approvedDailyPay < dailyPay
       ? "Approved (partially funded)"
       : "Approved";
-  const lines = [
-    `**Proposal #${proposalId(proposal)}: ${proposal.subject}**`,
-    `https://peakd.com/proposals/${proposalId(proposal)}`,
-    `Discussion: https://peakd.com/@${proposal.creator}/${proposal.permlink}`,
-    proposal.creator === proposal.receiver
-      ? `Creator: ${proposal.creator}`
-      : `Creator: ${proposal.creator}; Receiver: ${proposal.receiver}`,
-    `Start: ${formatRelativeTime(startDate)}`,
-    `End: ${formatRelativeTime(endDate)}`,
-    `Days: ${formatInteger(days - daysRemaining)} of ${formatInteger(days)}`,
-    `Daily Pay: ${formatNumber(dailyPay, 3)} ${dailyPaySymbol}`,
-    `Total Requested Pay: ${formatNumber(dailyPay * days, 0)} ${dailyPaySymbol}`,
-    `Total Votes (HP): ${formatNumber(totalVotesMhp, 1)}M`,
-    `Voters: ${formatInteger(context.voterCount)}`,
-    `${approvalLabel}: ${votesApproved ? "Yes" : "No"} (${formatNumber(approvalPercent, 2)}%)`,
-  ];
+  const postPreview = proposalPostPreview(context.post);
+  const totalRequestedPay = `${formatNumber(dailyPay * days, 0)} ${dailyPaySymbol}`;
+  const partialDailyPay = votesApproved && context.approvedDailyPay !== 0 && context.approvedDailyPay < dailyPay
+    ? `${formatNumber(context.approvedDailyPay, 3)} ${dailyPaySymbol}`
+    : null;
+  const embed = banjoEmbed()
+    .setTitle(`Proposal #${proposalId(proposal)}: ${proposal.subject}`)
+    .setURL(`https://peakd.com/proposals/${proposalId(proposal)}`)
+    .setFooter({ text: "Hive DHF Proposal", iconURL: HIVE_TOKEN_ICON_URL });
 
-  if (votesApproved && context.approvedDailyPay !== 0 && context.approvedDailyPay < dailyPay) {
-    lines.push(`Partial Daily Pay: ${formatNumber(context.approvedDailyPay, 3)} ${dailyPaySymbol}`);
+  embed.setDescription([
+    `${approvalLabel}: ${votesApproved ? "Yes" : "No"} (${formatNumber(approvalPercent, 2)}%)`,
+    `**Discussion:** [${proposal.creator}/${proposal.permlink}](https://peakd.com/@${proposal.creator}/${proposal.permlink})`,
+    proposalMetricTable({
+      proposal,
+      startDate,
+      endDate,
+      days,
+      daysRemaining,
+      dailyPay,
+      dailyPaySymbol,
+      totalVotesMhp,
+      voterCount: context.voterCount,
+    }),
+    `**Total Requested Pay:** ${totalRequestedPay}`,
+    partialDailyPay ? `**Partial Daily Pay:** ${partialDailyPay}` : null,
+    postPreview.description,
+  ].filter(Boolean).join("\n\n"));
+  if (postPreview.image) embed.setImage(postPreview.image);
+
+  return embed;
+}
+
+function proposalMetricTable(options: {
+  proposal: HiveProposal;
+  startDate: Date;
+  endDate: Date;
+  days: number;
+  daysRemaining: number;
+  dailyPay: number;
+  dailyPaySymbol: string;
+  totalVotesMhp: number;
+  voterCount: number;
+}): string {
+  const rows = [
+    ["Creator", "Receiver"],
+    [`@${options.proposal.creator}`, `@${options.proposal.receiver}`],
+    ["Start", "End"],
+    [formatRelativeTime(options.startDate), formatRelativeTime(options.endDate)],
+    ["Days", "Daily Pay"],
+    [`${formatInteger(options.days - options.daysRemaining)} of ${formatInteger(options.days)}`, `${formatNumber(options.dailyPay, 3)} ${options.dailyPaySymbol}`],
+    ["Total Votes (HP)", "Voters"],
+    [`${formatNumber(options.totalVotesMhp, 1)}M`, formatInteger(options.voterCount)],
+  ];
+  const leftWidth = Math.max(...rows.map((row) => row[0]?.length ?? 0));
+  return [
+    "```",
+    ...rows.map(([left, right]) => `${(left ?? "").padEnd(leftWidth)}  ${right ?? ""}`),
+    "```",
+  ].join("\n");
+}
+
+function renderProposalComponents(selected: HiveProposal[], selectedIndex: number): Array<ActionRowBuilder<ButtonBuilder>> {
+  if (selected.length <= 1) return [];
+
+  const ids = selected.map((proposal) => proposalId(proposal));
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(proposalButtonId(ids, selectedIndex - 1))
+        .setLabel("Previous")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedIndex === 0),
+      new ButtonBuilder()
+        .setCustomId(proposalButtonId(ids, selectedIndex + 1))
+        .setLabel("Next")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedIndex >= selected.length - 1),
+    ),
+  ];
+}
+
+function proposalButtonId(ids: number[], selectedIndex: number): string {
+  return [proposalButtonPrefix, Math.max(0, selectedIndex), ids.join(",")].join(":");
+}
+
+function proposalPostPreview(post: HivePost | null): { description?: string; image?: string } {
+  if (!post) return {};
+
+  const metadata = parsePossiblyDoubleJson(post.json_metadata ?? null);
+  const description = readMetadataDescription(metadata) ?? postBodyExcerpt(post.body);
+  const image = readMetadataImage(metadata);
+
+  return {
+    ...(description ? { description: truncateEmbedText(description, 600) } : {}),
+    ...(image ? { image } : {}),
+  };
+}
+
+function readMetadataDescription(metadata: Record<string, unknown>): string | null {
+  const description = metadata.description;
+  return typeof description === "string" && description.trim() ? description.trim() : null;
+}
+
+function readMetadataImage(metadata: Record<string, unknown>): string | null {
+  const image = metadata.image;
+  if (typeof image === "string" && image.trim()) return normalizeMetadataUrl(image.trim());
+  if (Array.isArray(image)) {
+    const first = image.find((value) => typeof value === "string" && value.trim());
+    return typeof first === "string" ? normalizeMetadataUrl(first.trim()) : null;
   }
 
-  return lines.join("\n");
+  return null;
+}
+
+function postBodyExcerpt(body: string | undefined): string | null {
+  if (!body) return null;
+  const text = body
+    .replace(/!\[[^\]]*]\([^)]*\)/g, "")
+    .replace(/\[[^\]]+]\(([^)]+)\)/g, "$1")
+    .replace(/[#>*_`~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return text || null;
 }
 
 function proposalId(proposal: HiveProposal): number {
@@ -2734,18 +3541,27 @@ function parseInflationArgs(args: string[]): { years: number; chain: string | un
   return { years: 5, chain: first };
 }
 
-function formatInflationProjection(years: number): string {
+function formatInflationProjection(years: number): EmbedBuilder {
   const rows = calculateInflationProjection(years);
 
-  return [
-    "```",
-    "| Year |   Supply    | Inflation | New Supply |",
-    "|------|-------------|-----------|------------|",
-    ...rows.map((row) =>
-      `| ${row.year} | ${formatInteger(row.supply)} |     ${formatNumber(row.inflation * 100, 2)}% | ${formatInteger(row.newSupply)} |`
-    ),
-    "```",
-  ].join("\n");
+  const embed = banjoEmbed()
+    .setTitle("Hive Inflation Projection")
+    .setDescription([
+      "```",
+      "| Year |   Supply    | Inflation | New Supply |",
+      "|------|-------------|-----------|------------|",
+      ...rows.map((row) =>
+        `| ${row.year} | ${formatInteger(row.supply)} |     ${formatNumber(row.inflation * 100, 2)}% | ${formatInteger(row.newSupply)} |`
+      ),
+      "```",
+    ].join("\n"))
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Years", String(years)),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function calculateInflationProjection(years: number): Array<{ year: number; supply: number; inflation: number; newSupply: number }> {
@@ -2880,6 +3696,28 @@ function formatUtc(date: Date): string {
   return date.toISOString().replace("T", " ").slice(0, 16);
 }
 
+function formatHardfork(
+  currentVersion: string,
+  majorityVersion: string,
+  nextLabel: "Last" | "Next",
+  hardforkVersion: string,
+  hardforkTime: Date,
+  witnesses: HiveWitness[],
+): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle("Hive Hardfork Status")
+    .setDescription(["Version Votes by Top 100 Witnesses:", "```markdown", hardforkVersionTable(witnesses), "```"].join("\n"))
+    .setFooter({ text: "Hive Chain", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Current", currentVersion),
+    dataField("Witness Majority", majorityVersion),
+    dataField(nextLabel, `${hardforkVersion} (${formatRelativeTime(hardforkTime)})`),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
+}
+
 function hardforkVersionTable(witnesses: HiveWitness[]): string {
   const grouped = new Map<string, { count: number; votes: bigint }>();
 
@@ -2988,15 +3826,21 @@ function parseHiveAssetAmount(value: string | { amount: string; precision: numbe
   return amount / 10 ** value.precision;
 }
 
-function formatWitness(witness: HiveWitness): string {
-  return [
-    `**${witness.owner}** is a Hive witness.`,
-    witness.running_version ? `Version: **${witness.running_version}**` : null,
-    typeof witness.total_missed === "number" ? `Missed blocks: **${witness.total_missed}**` : null,
-    witness.signing_key ? `Signing key: \`${witness.signing_key}\`` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
+function formatWitness(witness: HiveWitness): EmbedBuilder {
+  const embed = banjoEmbed()
+    .setTitle(`${witness.owner} is a Hive witness`)
+    .setURL(`https://hivehub.dev/witnesses/@${witness.owner}`)
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(witness.owner)}/avatar`)
+    .setFooter({ text: "Hive Witness", iconURL: HIVE_TOKEN_ICON_URL });
+
+  embed.addFields([
+    dataField("Version", witness.running_version ?? null),
+    dataField("Votes", witness.votes === undefined ? null : String(witness.votes)),
+    dataField("Missed Blocks", typeof witness.total_missed === "number" ? formatInteger(witness.total_missed) : null),
+    dataField("Signing Key", witness.signing_key ? `\`${witness.signing_key}\`` : null, false),
+  ].filter((field): field is NonNullable<typeof field> => field !== null));
+
+  return embed;
 }
 
 function formatNumber(value: number, digits: number): string {

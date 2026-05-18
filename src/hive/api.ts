@@ -109,6 +109,8 @@ export type HivePost = {
   author: string;
   permlink: string;
   title?: string;
+  body?: string;
+  json_metadata?: string;
   url?: string;
   created?: string;
   cashout_time?: string;
@@ -426,6 +428,8 @@ export class HiveRpcClient implements HiveApi {
     if (!created) return null;
 
     const title = typeof content.title === "string" && content.title ? content.title : null;
+    const body = typeof content.body === "string" && content.body ? content.body : null;
+    const jsonMetadata = typeof content.json_metadata === "string" && content.json_metadata ? content.json_metadata : null;
     const url = typeof content.url === "string" && content.url ? content.url : null;
     const cashoutTime = typeof content.cashout_time === "string" && content.cashout_time ? content.cashout_time : null;
     const pendingPayoutValue = typeof content.pending_payout_value === "string" && content.pending_payout_value ? content.pending_payout_value : null;
@@ -435,6 +439,8 @@ export class HiveRpcClient implements HiveApi {
       permlink,
       created,
       ...(title ? { title } : {}),
+      ...(body ? { body } : {}),
+      ...(jsonMetadata ? { json_metadata: jsonMetadata } : {}),
       ...(url ? { url } : {}),
       ...(cashoutTime ? { cashout_time: cashoutTime } : {}),
       ...(pendingPayoutValue ? { pending_payout_value: pendingPayoutValue } : {}),

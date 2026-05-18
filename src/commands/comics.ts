@@ -1,4 +1,5 @@
 import { XkcdHttpClient, type XkcdApi, type XkcdComic } from "../comics/xkcd.js";
+import { banjoEmbed } from "./embeds.js";
 import type { Command, CommandContext } from "./types.js";
 
 export const comicCommands: Command[] = [
@@ -37,11 +38,18 @@ function readXkcdNumber(value: string | undefined): number | null | string {
   return num;
 }
 
-function formatXkcd(comic: XkcdComic): string {
-  return [
-    `xkcd # ${comic.num}: ${comic.title}`,
-    comic.imageUrl,
-    comic.safeTitle === comic.title ? null : comic.safeTitle,
-    comic.alt ? `|| ${comic.alt} ||` : null,
-  ].filter(Boolean).join("\n");
+function formatXkcd(comic: XkcdComic) {
+  const embed = banjoEmbed()
+    .setTitle(`xkcd #${comic.num}: ${comic.title}`)
+    .setURL(`https://xkcd.com/${comic.num}/`)
+    .setImage(comic.imageUrl);
+
+  if (comic.safeTitle !== comic.title) embed.setDescription(comic.safeTitle);
+
+  const embeds = [embed];
+  if (comic.alt) {
+    embeds.push(banjoEmbed().setDescription(`|| ${comic.alt} ||`));
+  }
+
+  return { embeds };
 }

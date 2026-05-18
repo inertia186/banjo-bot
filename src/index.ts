@@ -11,7 +11,7 @@ import { parseCommand } from "./command-parser.js";
 import { loadConfig } from "./config.js";
 import { handleHelpInteraction } from "./commands/core.js";
 import { registerCommands } from "./commands/index.js";
-import { UserFacingCommandError } from "./commands/hive.js";
+import { handleNftShowroomInteraction, handleProposalInteraction, handleSearchInteraction, UserFacingCommandError } from "./commands/hive.js";
 import { LlmChat } from "./llm/chat.js";
 import { logger } from "./logger.js";
 import { startDelayedTyping } from "./typing.js";
@@ -85,7 +85,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
 
   try {
-    await handleHelpInteraction(interaction, config.commandPrefix);
+    if (await handleHelpInteraction(interaction, config.commandPrefix)) return;
+    if (interaction.isButton() && await handleProposalInteraction(interaction, config, logger)) return;
+    if (interaction.isButton() && await handleNftShowroomInteraction(interaction, config, logger)) return;
+    if (interaction.isButton() && await handleSearchInteraction(interaction, config, logger)) return;
   } catch (error) {
     logger.error("Interaction failed.", {
       customId: interaction.customId,
