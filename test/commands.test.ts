@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import type { Client, Message } from "discord.js";
 import { registerCommands } from "../src/commands/index.js";
+import { handleSplinterlandsInteraction } from "../src/commands/splinterlands.js";
 import type { Command, CommandContext } from "../src/commands/types.js";
 import type { AppConfig } from "../src/config.js";
 import type { XkcdApi } from "../src/comics/xkcd.js";
@@ -15,6 +16,7 @@ import type { HiveSqlApi } from "../src/hivesql/api.js";
 import type { Logger } from "../src/logger.js";
 import type { MarketApi } from "../src/market/api.js";
 import type { GiphyApi } from "../src/media/giphy.js";
+import type { SplinterlandsApi } from "../src/splinterlands/api.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
@@ -52,6 +54,9 @@ const config: AppConfig = {
     contractsUrl: "https://hive-engine.test/rpc/contracts",
     scotApiUrl: "https://scot.test",
   },
+  splinterlands: {
+    baseUrl: "https://splinterlands.test",
+  },
   giphy: {
     apiKey: null,
   },
@@ -74,7 +79,7 @@ function registry(): Map<string, Command> {
 function context(
   commands = registry(),
   commandName = "test",
-  services?: { hive?: HiveApi; hiveEngine?: HiveEngineApi; hiveNodes?: HiveNodeDirectory; hiveSql?: HiveSqlApi; market?: MarketApi; giphy?: GiphyApi; scot?: ScotApi; xkcd?: XkcdApi },
+  services?: { hive?: HiveApi; hiveEngine?: HiveEngineApi; hiveNodes?: HiveNodeDirectory; hiveSql?: HiveSqlApi; market?: MarketApi; giphy?: GiphyApi; scot?: ScotApi; xkcd?: XkcdApi; splinterlands?: SplinterlandsApi },
   message?: Partial<Message>,
 ): CommandContext {
   return {
@@ -112,6 +117,8 @@ test("registerCommands registers aliases to the same command", () => {
   assert.equal(commands.get("vo"), commands.get("say"));
   assert.equal(commands.get("prediction"), commands.get("predict"));
   assert.equal(commands.get("catfacts"), commands.get("catfact"));
+  assert.equal(commands.get("splinter"), commands.get("splinterlands"));
+  assert.equal(commands.get("spl"), commands.get("splinterlands"));
 });
 
 test("help lists each command once despite aliases", async () => {
@@ -234,6 +241,407 @@ test("version reports Banjo's package version and LLM model", async () => {
   const commands = registry();
 
   assert.equal(await commands.get("version")?.execute(context(commands), []), `banjo-bot v${packageJson.version} (LLM: test-model)`);
+});
+
+test("splinterlands reports player account details", async () => {
+  const commands = registry();
+  const response = await commands.get("splinterlands")?.execute(context(commands, "splinterlands", {
+    splinterlands: {
+      async getPlayer(name) {
+        assert.equal(name, "yabapmatt");
+        return {
+          name: "yabapmatt",
+          displayName: null,
+          joinDate: "2018-05-16T21:03:15.749Z",
+          guildName: "Crypto Friends Forever",
+          starterPackPurchase: true,
+          isBanned: false,
+          collectionPower: 49881702,
+          captureRate: 46.17021,
+          championPoints: 47158,
+          ranked: {
+            rating: 3800,
+            league: 13,
+            battles: 6479,
+            wins: 4551,
+            currentStreak: 3,
+            longestStreak: 67,
+            maxRating: 4927,
+            maxRank: 40,
+          },
+          modern: {
+            rating: 3840,
+            league: 13,
+            battles: 25768,
+            wins: 13349,
+            currentStreak: 0,
+            longestStreak: 16,
+            maxRating: 5200,
+            maxRank: 30,
+          },
+          survival: {
+            rating: 500,
+            league: 2,
+            battles: 115,
+            wins: 80,
+            currentStreak: 0,
+            longestStreak: 18,
+            maxRating: 980,
+            maxRank: 117,
+          },
+          foundation: {
+            rating: 1000,
+            league: 3,
+            battles: 135,
+            wins: 74,
+            currentStreak: 0,
+            longestStreak: 8,
+            maxRating: 1180,
+            maxRank: 14,
+          },
+        };
+      },
+      async getBalances(name) {
+        assert.equal(name, "yabapmatt");
+        return [
+          { token: "DEC", balance: 1234.56 },
+          { token: "SPS", balance: 0 },
+          { token: "SPSP", balance: 98765.4321 },
+          { token: "VOUCHER", balance: 17.5 },
+        ];
+      },
+      async getCollection() {
+        return [];
+      },
+      async getCardDetails() {
+        return [];
+      },
+    },
+  }), ["@yabapmatt"]);
+
+  const embed = embedJson<{ title?: string; description?: string; url?: string; thumbnail?: { url: string }; fields?: Array<{ name: string; value: string }> }>(response);
+
+  assert.equal(embed.title, "Splinterlands Overview: yabapmatt");
+  assert.equal(embed.url, "https://splinterlands.com/@yabapmatt");
+  assert.equal(embed.thumbnail?.url, "https://images.hive.blog/u/yabapmatt/avatar");
+  assert.match(embed.description ?? "", /Spellbook \| Guilded \| SPS \| Collection/);
+  assert.match(embed.description ?? "", /Joined May 16, 2018/);
+  assert.ok(embed.fields?.some((field) => field.name === "Modern" && /Diamond I/.test(field.value) && /51\.8% win rate/.test(field.value)));
+  assert.ok(embed.fields?.some((field) => field.name === "Collection Power" && field.value === "49,881,702"));
+  assert.ok(embed.fields?.some((field) => field.name === "Balances" && /DEC: 1,235/.test(field.value) && /VOUCHER: 17\.5/.test(field.value)));
+
+  assert.equal(typeof response, "object");
+  const components = (response as { components: Array<{ toJSON(): { components: Array<{ custom_id?: string; url?: string }> } }> }).components;
+  assert.equal(components.length, 2);
+  assert.equal(components[0]?.toJSON().components[0]?.custom_id, "spl:section:yabapmatt");
+  const actions = components[1]?.toJSON().components ?? [];
+  assert.equal(actions[0]?.custom_id, "spl:refresh:overview:yabapmatt");
+  assert.equal(actions[1]?.url, "https://splinterlands.com/@yabapmatt");
+  assert.equal(actions[2]?.url, "https://peakmonsters.com/@yabapmatt/cards");
+  assert.equal(actions[3]?.url, "https://peakd.com/@yabapmatt");
+});
+
+test("splinterlands rewards section includes claim links", async () => {
+  const originalFetch = globalThis.fetch;
+  let editOptions: unknown;
+
+  globalThis.fetch = async (input) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    if (url.pathname === "/players/details") {
+      return new Response(JSON.stringify({
+        name: "yabapmatt",
+        join_date: "2018-05-16T21:03:15.749Z",
+        starter_pack_purchase: true,
+        collection_power: 49881702,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname === "/players/balances") {
+      return new Response(JSON.stringify([
+        { token: "DEC", balance: 1234.56 },
+        { token: "SPSP", balance: 98765.4321 },
+        { token: "ECR", balance: "45.25" },
+        { token: "FECR", balance: null },
+      ]), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const interaction = {
+    customId: "spl:section:yabapmatt",
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    values: ["rewards"],
+    deferUpdate: async () => undefined,
+    message: {
+      edit: async (options: unknown) => {
+        editOptions = options;
+      },
+    },
+  };
+
+  try {
+    assert.equal(await handleSplinterlandsInteraction(interaction as never, config, logger), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(typeof editOptions, "object");
+  const embed = (editOptions as { embeds: Array<{ toJSON(): { title?: string; description?: string; fields?: Array<{ name: string; value: string }> } }> }).embeds[0]!.toJSON();
+  assert.equal(embed.title, "Splinterlands Rewards: yabapmatt");
+  assert.match(embed.description ?? "", /SPS Claim \| Game Claim \| ECR 45\.25%/);
+  assert.ok(embed.fields?.some((field) => field.name === "Balances" && /ECR: 45\.25/.test(field.value)));
+
+  const components = (editOptions as { components: Array<{ toJSON(): { components: Array<{ custom_id?: string; url?: string }> } }> }).components;
+  assert.equal(components[1]?.toJSON().components[0]?.custom_id, "spl:refresh:rewards:yabapmatt");
+  const buttons = components[2]?.toJSON().components ?? [];
+  const spsClaimUrl = buttons[0]?.url;
+  const gameClaimUrl = buttons[1]?.url;
+  assert.ok(spsClaimUrl);
+  assert.ok(gameClaimUrl);
+
+  const claimUrl = new URL(spsClaimUrl);
+  assert.equal(claimUrl.origin, "https://hivesigner.com");
+  assert.equal(claimUrl.pathname, "/sign/custom-json");
+  assert.equal(claimUrl.searchParams.get("authority"), "active");
+  assert.deepEqual(JSON.parse(claimUrl.searchParams.get("required_auths") ?? "[]"), ["yabapmatt"]);
+  assert.deepEqual(JSON.parse(claimUrl.searchParams.get("required_posting_auths") ?? "[]"), []);
+  assert.equal(claimUrl.searchParams.get("id"), "sm_claim_staking_rewards");
+
+  const claimJson = JSON.parse(claimUrl.searchParams.get("json") ?? "{}") as { token?: string; app?: string; n?: string };
+  assert.equal(claimJson.token, "SPS");
+  assert.equal(claimJson.app, `banjo-bot/${packageJson.version}`);
+  assert.equal(typeof claimJson.n, "string");
+  assert.match(claimJson.n ?? "", /^[a-zA-Z0-9]{10}$/);
+
+  const gameUrl = new URL(gameClaimUrl);
+  assert.equal(gameUrl.origin, "https://hivesigner.com");
+  assert.equal(gameUrl.pathname, "/sign/custom-json");
+  assert.equal(gameUrl.searchParams.get("authority"), "posting");
+  assert.deepEqual(JSON.parse(gameUrl.searchParams.get("required_auths") ?? "[]"), []);
+  assert.deepEqual(JSON.parse(gameUrl.searchParams.get("required_posting_auths") ?? "[]"), ["yabapmatt"]);
+  assert.equal(gameUrl.searchParams.get("id"), "sm_claim_rewards");
+
+  const gameJson = JSON.parse(gameUrl.searchParams.get("json") ?? "{}") as { token?: string; app?: string; n?: string };
+  assert.equal(gameJson.token, undefined);
+  assert.equal(gameJson.app, `banjo-bot/${packageJson.version}`);
+  assert.equal(typeof gameJson.n, "string");
+  assert.match(gameJson.n ?? "", /^[a-zA-Z0-9]{10}$/);
+});
+
+test("splinterlands overview interaction refreshes the overview section", async () => {
+  const originalFetch = globalThis.fetch;
+  let editOptions: unknown;
+
+  globalThis.fetch = async (input) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    if (url.pathname === "/players/details") {
+      return new Response(JSON.stringify({
+        name: "alice",
+        starter_pack_purchase: false,
+        modern_rating: 1200,
+        modern_league: 5,
+        modern_battles: 10,
+        modern_wins: 6,
+      }), { status: 200 });
+    }
+    if (url.pathname === "/players/balances") {
+      return new Response(JSON.stringify([{ token: "DEC", balance: 5 }]), { status: 200 });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const interaction = {
+    customId: "spl:section:alice",
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    values: ["overview"],
+    deferUpdate: async () => undefined,
+    message: {
+      edit: async (options: unknown) => {
+        editOptions = options;
+      },
+    },
+  };
+
+  try {
+    assert.equal(await handleSplinterlandsInteraction(interaction as never, config, logger), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const embed = (editOptions as { embeds: Array<{ toJSON(): { title?: string; fields?: Array<{ name: string; value: string }> } }> }).embeds[0]!.toJSON();
+  assert.equal(embed.title, "Splinterlands Overview: alice");
+  assert.ok(embed.fields?.some((field) => field.name === "Modern" && /Silver III/.test(field.value)));
+});
+
+test("splinterlands refresh button refreshes the current section", async () => {
+  const originalFetch = globalThis.fetch;
+  let editOptions: unknown;
+
+  globalThis.fetch = async (input) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    if (url.pathname === "/players/details") {
+      return new Response(JSON.stringify({
+        name: "alice",
+        starter_pack_purchase: true,
+        collection_power: 123,
+      }), { status: 200 });
+    }
+    if (url.pathname === "/players/balances") {
+      return new Response(JSON.stringify([{ token: "SPS", balance: 7 }]), { status: 200 });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const interaction = {
+    customId: "spl:refresh:overview:alice",
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    deferUpdate: async () => undefined,
+    message: {
+      edit: async (options: unknown) => {
+        editOptions = options;
+      },
+    },
+  };
+
+  try {
+    assert.equal(await handleSplinterlandsInteraction(interaction as never, config, logger), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const embed = (editOptions as { embeds: Array<{ toJSON(): { title?: string; fields?: Array<{ name: string; value: string }> } }> }).embeds[0]!.toJSON();
+  assert.equal(embed.title, "Splinterlands Overview: alice");
+  assert.ok(embed.fields?.some((field) => field.name === "Balances" && /SPS: 7/.test(field.value)));
+});
+
+test("splinterlands collection section summarizes public collection data", async () => {
+  const originalFetch = globalThis.fetch;
+  let editOptions: unknown;
+
+  globalThis.fetch = async (input) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    if (url.pathname === "/players/details") {
+      return new Response(JSON.stringify({ name: "alice", starter_pack_purchase: true }), { status: 200 });
+    }
+    if (url.pathname === "/cards/collection/alice") {
+      return new Response(JSON.stringify({
+        player: "alice",
+        cards: [
+          { uid: "a", card_detail_id: 1, collection_power: "100", gold: false, foil: 0, delegated_to: null, market_id: null, market_listing_type: null, stake_ref_uid: null },
+          { uid: "b", card_detail_id: 2, collection_power: 500, gold: true, foil: 1, delegated_to: "bob", market_id: "m1", market_listing_type: "RENT", stake_ref_uid: "land-1" },
+          { uid: "c", card_detail_id: 2, collection_power: 250, gold: false, foil: 0, delegated_to: "carol", market_id: null, market_listing_type: null, stake_ref_uid: null },
+          { uid: "d", card_detail_id: 3, collection_power: 50, gold: false, foil: 0, delegated_to: null, market_id: "m2", market_listing_type: "SELL", stake_ref_uid: null },
+        ],
+      }), { status: 200 });
+    }
+    if (url.pathname === "/cards/get_details") {
+      return new Response(JSON.stringify([
+        { id: 1, name: "Goblin Shaman", game_type: "splinterlands" },
+        { id: 2, name: "Giant Roc", game_type: "splinterlands" },
+        { id: 3, name: "Kobold Miner", game_type: "splinterlands" },
+      ]), { status: 200 });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const interaction = {
+    customId: "spl:section:alice",
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    values: ["collection"],
+    deferUpdate: async () => undefined,
+    message: {
+      edit: async (options: unknown) => {
+        editOptions = options;
+      },
+    },
+  };
+
+  try {
+    assert.equal(await handleSplinterlandsInteraction(interaction as never, config, logger), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const embed = (editOptions as { embeds: Array<{ toJSON(): { title?: string; description?: string; fields?: Array<{ name: string; value: string }> } }> }).embeds[0]!.toJSON();
+  assert.equal(embed.title, "Splinterlands Collection: alice");
+  assert.match(embed.description ?? "", /4 cards \| 3 unique \| 1 gold \| 1 land-staked/);
+  assert.ok(embed.fields?.some((field) => field.name === "Cards" && field.value === "4"));
+  assert.ok(embed.fields?.some((field) => field.name === "Unique Types" && field.value === "3"));
+  assert.ok(embed.fields?.some((field) => field.name === "Collection Power" && field.value === "900"));
+  assert.ok(embed.fields?.some((field) => field.name === "Gold Foils" && field.value === "1"));
+  assert.ok(embed.fields?.some((field) => field.name === "Rented Out" && field.value === "1"));
+  assert.ok(embed.fields?.some((field) => field.name === "Delegated Out" && field.value === "1"));
+  assert.ok(embed.fields?.some((field) => field.name === "Listed" && field.value === "1"));
+  assert.ok(embed.fields?.some((field) => field.name === "Land Staked" && field.value === "1"));
+  assert.ok(embed.fields?.some((field) => field.name === "Top Cards" && /Giant Roc: 500 CP/.test(field.value)));
+});
+
+test("splinterlands collection section handles collection failures locally", async () => {
+  const originalFetch = globalThis.fetch;
+  let editOptions: unknown;
+
+  globalThis.fetch = async (input) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    if (url.pathname === "/players/details") {
+      return new Response(JSON.stringify({ name: "alice", starter_pack_purchase: true }), { status: 200 });
+    }
+    if (url.pathname === "/cards/collection/alice") {
+      return new Response("nope", { status: 503 });
+    }
+    if (url.pathname === "/cards/get_details") {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const interaction = {
+    customId: "spl:section:alice",
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    values: ["collection"],
+    deferUpdate: async () => undefined,
+    message: {
+      edit: async (options: unknown) => {
+        editOptions = options;
+      },
+    },
+  };
+
+  try {
+    assert.equal(await handleSplinterlandsInteraction(interaction as never, config, logger), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const embed = (editOptions as { embeds: Array<{ toJSON(): { title?: string; description?: string; fields?: Array<{ name: string; value: string }> } }> }).embeds[0]!.toJSON();
+  assert.equal(embed.title, "Splinterlands Collection: alice");
+  assert.match(embed.description ?? "", /Collection unavailable/);
+  assert.ok(embed.fields?.some((field) => field.name === "Collection" && /unavailable/.test(field.value)));
+});
+
+test("splinterlands handles unknown players", async () => {
+  const commands = registry();
+  const response = await commands.get("splinterlands")?.execute(context(commands, "splinterlands", {
+    splinterlands: {
+      async getPlayer() {
+        return null;
+      },
+      async getBalances() {
+        return [];
+      },
+      async getCollection() {
+        return [];
+      },
+      async getCardDetails() {
+        return [];
+      },
+    },
+  }), ["missing"]);
+
+  assert.equal(response, "Unable to find Splinterlands player **missing**.");
 });
 
 test("birthday reports tracked legacy birthdays", async () => {

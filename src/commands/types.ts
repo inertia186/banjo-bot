@@ -9,6 +9,7 @@ import type { HiveSqlApi } from "../hivesql/api.js";
 import type { Logger } from "../logger.js";
 import type { MarketApi } from "../market/api.js";
 import type { GiphyApi } from "../media/giphy.js";
+import type { SplinterlandsApi } from "../splinterlands/api.js";
 
 export type CommandContext = {
   message: Message;
@@ -24,6 +25,7 @@ export type CommandContext = {
     market?: MarketApi;
     giphy?: GiphyApi;
     xkcd?: XkcdApi;
+    splinterlands?: SplinterlandsApi;
   };
 };
 

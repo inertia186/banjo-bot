@@ -13,6 +13,7 @@ import { loadConfig } from "./config.js";
 import { handleHelpInteraction } from "./commands/core.js";
 import { registerCommands } from "./commands/index.js";
 import { handleNftShowroomInteraction, handleProposalInteraction, handleSearchInteraction, UserFacingCommandError } from "./commands/hive.js";
+import { handleSplinterlandsInteraction } from "./commands/splinterlands.js";
 import { LlmChat } from "./llm/chat.js";
 import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "./llm/channel-context.js";
 import { LlmConversationLeases } from "./llm/conversation-lease.js";
@@ -127,6 +128,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (await handleHelpInteraction(interaction, config.commandPrefix)) return;
     if (await handleProposalInteraction(interaction, config, logger)) return;
+    if (await handleSplinterlandsInteraction(interaction, config, logger)) return;
     if (interaction.isButton() && await handleNftShowroomInteraction(interaction, config, logger)) return;
     if (interaction.isButton() && await handleSearchInteraction(interaction, config, logger)) return;
   } catch (error) {

@@ -27,6 +27,9 @@ export type AppConfig = {
     contractsUrl: string;
     scotApiUrl: string;
   };
+  splinterlands: {
+    baseUrl: string;
+  };
   giphy: {
     apiKey: string | null;
   };
@@ -82,6 +85,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     hiveEngine: {
       contractsUrl: env.HIVE_ENGINE_CONTRACTS_URL?.replace(/\/+$/, "") || "https://api.hive-engine.com/rpc/contracts",
       scotApiUrl: env.SCOT_API_URL?.replace(/\/+$/, "") || "https://scot-api.hive-engine.com",
+    },
+    splinterlands: {
+      baseUrl: env.SPLINTERLANDS_API_BASE_URL?.replace(/\/+$/, "") || "https://api.splinterlands.com",
     },
     giphy: {
       apiKey: env.GIPHY_API_KEY ?? null,
