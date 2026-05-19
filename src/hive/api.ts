@@ -157,6 +157,7 @@ export type HiveProposal = {
   end_date: string;
   daily_pay: string | HiveAssetObject;
   total_votes: string | number;
+  status?: string;
 };
 
 export type HiveRewardOperation = {
@@ -202,7 +203,7 @@ export type HiveApi = {
   getLatestAccountOperation(name: string): Promise<HiveAccountOperation | null>;
   getRewardOperations(name: string, pages?: number): Promise<HiveRewardOperation[]>;
   getRewardFund(name: string): Promise<HiveRewardFund>;
-  listProposals(): Promise<HiveProposal[]>;
+  listProposals(status?: "all" | "inactive" | "active" | "expired" | "votable"): Promise<HiveProposal[]>;
   listProposalVotesByProposal(proposalId: number): Promise<HiveProposalVote[]>;
   listProposalVotes(voter: string): Promise<HiveProposalVote[]>;
   getHardforkVersion(): Promise<string>;
@@ -430,6 +431,7 @@ export class HiveRpcClient implements HiveApi {
       throw error;
     }
 
+    if (!content || typeof content !== "object") return null;
     if (content.author !== author || content.permlink !== permlink) return null;
 
     const created = typeof content.created === "string" && content.created ? content.created : null;
@@ -476,13 +478,13 @@ export class HiveRpcClient implements HiveApi {
     return this.call<HiveRewardFund>("condenser_api.get_reward_fund", [name]);
   }
 
-  async listProposals(): Promise<HiveProposal[]> {
+  async listProposals(status: "all" | "inactive" | "active" | "expired" | "votable" = "votable"): Promise<HiveProposal[]> {
     return this.call<HiveProposal[]>("condenser_api.list_proposals", [
       [""],
       1000,
       "by_start_date",
       "descending",
-      "votable",
+      status,
     ]);
   }
 

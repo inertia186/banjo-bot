@@ -565,6 +565,26 @@ Tasks:
 3. Confirm mobile readability opportunistically, especially for table-like embeds.
 4. Remove duplicated formatting helpers only after behavior is covered by tests.
 5. Update `docs/api-notes.md` only when a modernization exposes an API behavior detail, not for cosmetic changes.
+6. Consider a shared component-navigation helper for `$help`, `$search`, `$nftsr`, and `$proposal` once at least one more paginated command needs nontrivial polish.
+
+Navigation lessons from `$proposal`:
+
+- Always acknowledge component interactions quickly with `deferUpdate()` or an immediate ephemeral response.
+- For slow page transitions, visibly replace active controls with a disabled loading state before doing API/database work. Discord does not expose a true long-running pulse, so the loading component is the practical feedback.
+- Cache the page set and per-page expensive details for short windows. Navigation should not refetch every list, vote set, post preview, or SQL aggregate when the user is only moving between already-selected pages.
+- Treat rapid clicks as normal. Old buttons can still produce overlapping interactions before the loading edit is visible to every client.
+- Add a small recovery path: if a refresh fails after showing loading controls, restore basic Previous/Next controls and tell the clicker to try again instead of leaving the message stuck.
+- Keep stale or expired component behavior humble. A brief ephemeral note is better than editing the public embed into an error state.
+- Do not overfit this into a framework yet. `$help` is fast enough today, while `$proposal` needed loading feedback because it can wait on Hive RPC and HiveSQL.
+
+Future `$proposal` idea: related treasury transfers
+
+- People can donate HIVE/HBD to the DHF treasury account. On Hive this is `hive.fund`; historically, during the Steem-to-Hive transition, proposal/treasury activity may reference `steem.dao`.
+- Some transfers to `hive.fund`, `steem.dao`, or the configured treasury account may be proposal-related returns or donations, but they are not protocol-level proposal payments.
+- If this is added, keep it separate from `Payment Result` and proposal accounting. Use a label such as `Related Treasury Transfers`, not `Returned Pay`, unless the memo explicitly identifies the proposal.
+- Conservative scan scope: transfers from the proposal creator or receiver, during the scheduled proposal window plus a short grace period after the end, to `hive.fund`, `steem.dao`, or the configured treasury account.
+- Show timestamp, sender, recipient, amount, memo excerpt, and block/transaction link when available.
+- Do not subtract these transfers from actual paid totals unless a later design adds an explicitly labeled net-after-related-transfers line.
 
 ## Completed Work Order
 
@@ -621,4 +641,6 @@ This order started with high-confidence card conversions, then moved into comman
 
 - Audit embed titles, URLs, and footers after any future source/API changes.
 - Consider extracting more account/post/link helpers if a future refactor touches `$help`, `$token`, or the older command formatters.
+- Consider extracting a shared paginated-component helper if another embed develops `$proposal`-level latency or race handling needs.
+- Consider a carefully labeled `$proposal` related-treasury-transfers section for donations/returns to `hive.fund` or historical `steem.dao`.
 - Revisit table-heavy embeds only if Discord mobile readability becomes a practical problem.

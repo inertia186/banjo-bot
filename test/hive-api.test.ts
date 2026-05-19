@@ -195,6 +195,34 @@ test("Hive post creation fails fast when content is unavailable", async () => {
   }
 });
 
+test("Hive post creation treats null content as not found", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+
+    assert.equal(body.method, "condenser_api.get_content");
+    assert.deepEqual(body.params, ["proposal", "missing-discussion"]);
+
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: null,
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const client = new HiveRpcClient(config, logger);
+
+    assert.equal(await client.getPostCreation("proposal", "missing-discussion"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Hive post creation treats missing content RPC errors as not found", async () => {
   const originalFetch = globalThis.fetch;
   const methods: string[] = [];

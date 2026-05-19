@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   type GuildTextBasedChannel,
   type Message,
@@ -125,7 +126,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   try {
     if (await handleHelpInteraction(interaction, config.commandPrefix)) return;
-    if (interaction.isButton() && await handleProposalInteraction(interaction, config, logger)) return;
+    if (await handleProposalInteraction(interaction, config, logger)) return;
     if (interaction.isButton() && await handleNftShowroomInteraction(interaction, config, logger)) return;
     if (interaction.isButton() && await handleSearchInteraction(interaction, config, logger)) return;
   } catch (error) {
@@ -136,9 +137,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     });
 
     if (!interaction.deferred && !interaction.replied) {
-      await interaction.reply({ content: "Sorry, that control failed.", ephemeral: true }).catch(() => undefined);
+      await interaction.reply({ content: "Sorry, that control failed.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
     } else if (interaction.isRepliable()) {
-      await interaction.followUp({ content: "Sorry, that control failed.", ephemeral: true }).catch(() => undefined);
+      await interaction.followUp({ content: "Sorry, that control failed.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
     }
   }
 });

@@ -1,5 +1,6 @@
 import sql from "mssql";
 import type { AppConfig } from "../config.js";
+import type { HiveProposal } from "../hive/api.js";
 import type { Logger } from "../logger.js";
 
 export type HiveSqlApi = {
@@ -7,6 +8,9 @@ export type HiveSqlApi = {
   searchComments(options: HiveSqlSearchOptions): Promise<HiveSqlSearchResult>;
   getTopPost(options: HiveSqlTopPostOptions): Promise<HiveSqlTopPost | null>;
   getAppPayouts(options: HiveSqlAppPayoutOptions): Promise<HiveSqlAppPayout[]>;
+  getProposalById(proposalId: number): Promise<HiveProposal | null>;
+  getProposalPayments(proposalId: number): Promise<HiveSqlProposalPayments>;
+  getProposalTimeline(proposalId: number): Promise<HiveSqlProposalTimelineEvent[]>;
   getPromotedSummary(timeframe: HiveSqlPromotedTimeframe): Promise<HiveSqlPromotedSummary>;
   getDistribution(daysAgo: number): Promise<HiveSqlDistributionSummary>;
   findBadges(terms: string[], limit: number): Promise<HiveSqlBadge[]>;
@@ -103,6 +107,35 @@ export type HiveSqlAppPayout = {
   payout: number;
 };
 
+export type HiveSqlProposalPayments = {
+  total: number;
+  count: number;
+  symbol: string;
+  firstPaidAt: Date | null;
+  lastPaidAt: Date | null;
+  runs: HiveSqlProposalPaymentRun[];
+};
+
+export type HiveSqlProposalPaymentRun = {
+  startedAt: Date;
+  endedAt: Date;
+  total: number;
+  count: number;
+  symbol: string;
+};
+
+export type HiveSqlProposalTimelineEvent = {
+  timestamp: Date;
+  kind: "created" | "updated";
+  dailyPay: number | null;
+  symbol: string;
+  subject: string | null;
+  permlink: string | null;
+  txId: string | null;
+  blockNum: number | null;
+  transactionNum: number | null;
+};
+
 export type HiveSqlBadge = {
   name: string;
   recoveryAccount: string;
@@ -146,6 +179,7 @@ export type HiveSqlAccountSummary = {
 };
 
 export class HiveSqlClient implements HiveSqlApi {
+  private static loggedConnection = false;
   private pool: sql.ConnectionPool | null = null;
 
   constructor(
@@ -350,6 +384,256 @@ export class HiveSqlClient implements HiveSqlApi {
       app: row.app || "unknown",
       payout: Number(row.payout),
     }));
+  }
+
+  async getProposalPayments(proposalId: number): Promise<HiveSqlProposalPayments> {
+    const pool = await this.connection();
+    const response = await pool.request()
+      .input("proposalId", sql.Int, proposalId)
+      .query<{
+        total: number;
+        count: number;
+        symbol: string | null;
+        firstPaidAt: Date | null;
+        lastPaidAt: Date | null;
+        startedAt: Date;
+        endedAt: Date;
+      }>(`
+        SELECT
+          COALESCE(SUM(CASE WHEN [payment] > 0 THEN [payment] ELSE 0 END), 0) AS [total],
+          COALESCE(SUM(CASE WHEN [payment] > 0 THEN 1 ELSE 0 END), 0) AS [count],
+          COALESCE(MIN([payment_symbol]), 'HBD') AS [symbol],
+          MIN(CASE WHEN [payment] > 0 THEN [timestamp] END) AS [firstPaidAt],
+          MAX(CASE WHEN [payment] > 0 THEN [timestamp] END) AS [lastPaidAt]
+        FROM [VOProposalPays]
+        WHERE [proposal_id] = @proposalId
+
+        ;WITH [positive_pays] AS (
+          SELECT
+            [timestamp],
+            [payment],
+            [payment_symbol],
+            LAG([timestamp]) OVER (ORDER BY [timestamp]) AS [previousTimestamp]
+          FROM [VOProposalPays]
+          WHERE [proposal_id] = @proposalId
+            AND [payment] > 0
+        ),
+        [marked_pays] AS (
+          SELECT
+            [timestamp],
+            [payment],
+            [payment_symbol],
+            CASE
+              WHEN [previousTimestamp] IS NULL OR DATEDIFF(minute, [previousTimestamp], [timestamp]) > 720 THEN 1
+              ELSE 0
+            END AS [newRun]
+          FROM [positive_pays]
+        ),
+        [grouped_pays] AS (
+          SELECT
+            [timestamp],
+            [payment],
+            [payment_symbol],
+            SUM([newRun]) OVER (ORDER BY [timestamp] ROWS UNBOUNDED PRECEDING) AS [runId]
+          FROM [marked_pays]
+        )
+        SELECT
+          MIN([timestamp]) AS [startedAt],
+          MAX([timestamp]) AS [endedAt],
+          SUM([payment]) AS [total],
+          COUNT(*) AS [count],
+          COALESCE(MIN([payment_symbol]), 'HBD') AS [symbol]
+        FROM [grouped_pays]
+        GROUP BY [runId]
+        ORDER BY [startedAt]
+      `);
+    const row = response.recordset[0];
+    const runs = (response.recordsets[1] ?? []).map((run) => ({
+      startedAt: run.startedAt,
+      endedAt: run.endedAt,
+      total: Number(run.total ?? 0),
+      count: Number(run.count ?? 0),
+      symbol: run.symbol ?? "HBD",
+    }));
+
+    return {
+      total: Number(row?.total ?? 0),
+      count: Number(row?.count ?? 0),
+      symbol: row?.symbol ?? "HBD",
+      firstPaidAt: row?.firstPaidAt ?? null,
+      lastPaidAt: row?.lastPaidAt ?? null,
+      runs,
+    };
+  }
+
+  async getProposalById(proposalId: number): Promise<HiveProposal | null> {
+    const pool = await this.connection();
+    const response = await pool.request()
+      .input("proposalId", sql.Int, proposalId)
+      .query<{
+        id: number;
+        creator: string;
+        receiver: string;
+        startDate: Date;
+        endDate: Date;
+        dailyPay: number;
+        symbol: string | null;
+        subject: string | null;
+        permlink: string | null;
+        totalVotes: string | number | null;
+      }>(`
+        SELECT
+          [id],
+          [creator],
+          [receiver],
+          [start_date] AS [startDate],
+          [end_date] AS [endDate],
+          [daily_pay] AS [dailyPay],
+          [daily_pay_symbol] AS [symbol],
+          [subject],
+          [permlink],
+          [total_votes] AS [totalVotes]
+        FROM [Proposals]
+        WHERE [id] = @proposalId
+      `);
+    const row = response.recordset[0];
+    if (!row) return null;
+
+    const symbol = row.symbol ?? "HBD";
+    return {
+      id: Number(row.id),
+      proposal_id: Number(row.id),
+      creator: row.creator,
+      receiver: row.receiver,
+      subject: row.subject ?? `Proposal #${row.id}`,
+      permlink: row.permlink ?? "",
+      start_date: row.startDate.toISOString().replace(".000Z", ""),
+      end_date: row.endDate.toISOString().replace(".000Z", ""),
+      daily_pay: `${Number(row.dailyPay ?? 0).toFixed(3)} ${symbol}`,
+      total_votes: String(row.totalVotes ?? "0"),
+      status: row.endDate.getTime() < Date.now() ? "expired" : "active",
+    };
+  }
+
+  async getProposalTimeline(proposalId: number): Promise<HiveSqlProposalTimelineEvent[]> {
+    const pool = await this.connection();
+    const proposal = await pool.request()
+      .input("proposalId", sql.Int, proposalId)
+      .query<{
+        creator: string;
+        receiver: string;
+        startDate: Date;
+        endDate: Date;
+        subject: string | null;
+        permlink: string | null;
+      }>(`
+        SELECT
+          [creator],
+          [receiver],
+          [start_date] AS [startDate],
+          [end_date] AS [endDate],
+          [subject],
+          [permlink]
+        FROM [Proposals]
+        WHERE [id] = @proposalId
+      `);
+    const proposalRow = proposal.recordset[0];
+    const events: HiveSqlProposalTimelineEvent[] = [];
+
+    if (proposalRow) {
+      const creates = await pool.request()
+        .input("creator", sql.VarChar(16), proposalRow.creator)
+        .input("receiver", sql.VarChar(16), proposalRow.receiver)
+        .input("startDate", sql.DateTime, proposalRow.startDate)
+        .input("endDate", sql.DateTime, proposalRow.endDate)
+        .input("permlink", sql.VarChar(256), proposalRow.permlink)
+        .query<{
+          timestamp: Date;
+          dailyPay: number | null;
+          symbol: string | null;
+          subject: string | null;
+          permlink: string | null;
+          txId: string | number | null;
+          blockNum: number | null;
+          transactionNum: number | null;
+        }>(`
+          SELECT TOP 1
+            [proposal_create].[timestamp],
+            [proposal_create].[daily_pay] AS [dailyPay],
+            [proposal_create].[daily_pay_symbol] AS [symbol],
+            [proposal_create].[subject],
+            [proposal_create].[permlink],
+            [proposal_create].[tx_id] AS [txId],
+            [transaction].[block_num] AS [blockNum],
+            [transaction].[transaction_num] AS [transactionNum]
+          FROM [TxProposalCreates] AS [proposal_create]
+          LEFT JOIN [Transactions] AS [transaction]
+            ON [transaction].[tx_id] = [proposal_create].[tx_id]
+          WHERE [proposal_create].[creator] = @creator
+            AND [proposal_create].[receiver] = @receiver
+            AND [proposal_create].[start_date] = @startDate
+            AND [proposal_create].[end_date] = @endDate
+          ORDER BY CASE WHEN [proposal_create].[permlink] = @permlink THEN 0 ELSE 1 END, [proposal_create].[timestamp] ASC
+        `);
+
+      for (const row of creates.recordset) {
+        events.push({
+          timestamp: row.timestamp,
+          kind: "created",
+          dailyPay: row.dailyPay === null || row.dailyPay === undefined ? null : Number(row.dailyPay),
+          symbol: row.symbol ?? "HBD",
+          subject: row.subject,
+          permlink: row.permlink,
+          txId: row.txId === null || row.txId === undefined ? null : String(row.txId),
+          blockNum: row.blockNum === null || row.blockNum === undefined ? null : Number(row.blockNum),
+          transactionNum: row.transactionNum === null || row.transactionNum === undefined ? null : Number(row.transactionNum),
+        });
+      }
+    }
+
+    const updates = await pool.request()
+      .input("proposalId", sql.Int, proposalId)
+      .query<{
+        timestamp: Date;
+        dailyPay: number | null;
+        symbol: string | null;
+        subject: string | null;
+        permlink: string | null;
+        txId: string | number | null;
+        blockNum: number | null;
+        transactionNum: number | null;
+      }>(`
+        SELECT
+          [proposal_update].[timestamp],
+          [proposal_update].[daily_pay] AS [dailyPay],
+          [proposal_update].[daily_pay_symbol] AS [symbol],
+          [proposal_update].[subject],
+          [proposal_update].[permlink],
+          [proposal_update].[tx_id] AS [txId],
+          [transaction].[block_num] AS [blockNum],
+          [transaction].[transaction_num] AS [transactionNum]
+        FROM [TxProposalUpdates] AS [proposal_update]
+        LEFT JOIN [Transactions] AS [transaction]
+          ON [transaction].[tx_id] = [proposal_update].[tx_id]
+        WHERE [proposal_update].[proposal_id] = @proposalId
+        ORDER BY [proposal_update].[timestamp] ASC
+      `);
+
+    for (const row of updates.recordset) {
+      events.push({
+        timestamp: row.timestamp,
+        kind: "updated",
+        dailyPay: row.dailyPay === null || row.dailyPay === undefined ? null : Number(row.dailyPay),
+        symbol: row.symbol ?? "HBD",
+        subject: row.subject,
+        permlink: row.permlink,
+        txId: row.txId === null || row.txId === undefined ? null : String(row.txId),
+        blockNum: row.blockNum === null || row.blockNum === undefined ? null : Number(row.blockNum),
+        transactionNum: row.transactionNum === null || row.transactionNum === undefined ? null : Number(row.transactionNum),
+      });
+    }
+
+    return events.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
   }
 
   async getPromotedSummary(timeframe: HiveSqlPromotedTimeframe): Promise<HiveSqlPromotedSummary> {
@@ -712,10 +996,13 @@ export class HiveSqlClient implements HiveSqlApi {
       },
     }).connect();
 
-    this.logger.info("Connected to HiveSQL.", {
-      server: this.config.hiveSql.server,
-      database: this.config.hiveSql.database,
-    });
+    if (!HiveSqlClient.loggedConnection) {
+      HiveSqlClient.loggedConnection = true;
+      this.logger.info("Connected to HiveSQL.", {
+        server: this.config.hiveSql.server,
+        database: this.config.hiveSql.database,
+      });
+    }
 
     return this.pool;
   }

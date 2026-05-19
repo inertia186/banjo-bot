@@ -648,7 +648,7 @@ test("hive account commands use the injected Hive API", async () => {
       recent_claims: "1234567890123456",
       percent_curation_rewards: 5000,
     }),
-    listProposals: async () => [
+    listProposals: async (status = "votable") => [
       {
         proposal_id: 1,
         creator: "dev-account",
@@ -659,6 +659,7 @@ test("hive account commands use the injected Hive API", async () => {
         end_date: "2030-01-01T00:00:00",
         daily_pay: "10.000 HBD",
         total_votes: "3000000000000",
+        status: "active",
       },
       {
         proposal_id: 2,
@@ -670,6 +671,7 @@ test("hive account commands use the injected Hive API", async () => {
         end_date: "2030-01-01T00:00:00",
         daily_pay: "1000.000 HBD",
         total_votes: "2000000000000",
+        status: "active",
       },
       {
         proposal_id: 3,
@@ -681,7 +683,22 @@ test("hive account commands use the injected Hive API", async () => {
         end_date: "2030-01-01T00:00:00",
         daily_pay: "1.000 HBD",
         total_votes: "1000000000000",
+        status: "active",
       },
+      ...(status === "all"
+        ? [{
+            proposal_id: 4,
+            creator: "old-dev",
+            receiver: "old-dev",
+            subject: "Old developer work",
+            permlink: "old-developer-work",
+            start_date: "2021-01-01T00:00:00",
+            end_date: "2021-01-11T00:00:00",
+            daily_pay: "5.000 HBD",
+            total_votes: "4000000000000",
+            status: "expired",
+          }]
+        : []),
     ],
     listProposalVotesByProposal: async (proposalId) => [
       {
@@ -999,6 +1016,64 @@ test("hive account commands use the injected Hive API", async () => {
         { app: "ecency/3.2.0", payout: 2345 },
         { app: "unknown", payout: 123 },
       ].slice(0, options.limit),
+    getProposalById: async (proposalId) => proposalId === 63
+      ? {
+          id: 63,
+          proposal_id: 63,
+          creator: "inertia",
+          receiver: "inertia",
+          subject: "Historical docs",
+          permlink: "historical-docs",
+          start_date: "2020-01-01T00:00:00",
+          end_date: "2020-04-01T00:00:00",
+          daily_pay: "490.000 HBD",
+          total_votes: "1230000000000000",
+          status: "expired",
+        }
+      : null,
+    getProposalPayments: async (proposalId) => proposalId === 4
+      ? {
+          total: 17.5,
+          count: 7,
+          symbol: "HBD",
+          firstPaidAt: new Date("2020-03-19T12:00:00Z"),
+          lastPaidAt: new Date("2020-03-21T12:00:00Z"),
+          runs: [],
+        }
+      : {
+          total: 1234.567,
+          count: 124,
+          symbol: "HBD",
+          firstPaidAt: new Date("2026-01-01T00:00:00Z"),
+          lastPaidAt: new Date("2026-05-01T00:00:00Z"),
+          runs: [],
+        },
+    getProposalTimeline: async (proposalId) => proposalId === 4
+      ? [
+          {
+            timestamp: new Date("2020-12-20T12:00:00Z"),
+            kind: "created",
+            dailyPay: 10,
+            symbol: "HBD",
+            subject: "Old developer work",
+            permlink: "old-developer-work",
+            txId: "1001",
+            blockNum: 50_000_001,
+            transactionNum: 3,
+          },
+          {
+            timestamp: new Date("2021-01-05T12:00:00Z"),
+            kind: "updated",
+            dailyPay: 5,
+            symbol: "HBD",
+            subject: "Old developer work",
+            permlink: "old-developer-work",
+            txId: "1002",
+            blockNum: 50_000_002,
+            transactionNum: 4,
+          },
+        ]
+      : [],
     getPromotedSummary: async (timeframe) => ({
       timeframe,
       count: timeframe === "today" ? 0 : 2,
@@ -1199,10 +1274,10 @@ test("hive account commands use the injected Hive API", async () => {
   assert.equal(proposalEmbed.url, "https://peakd.com/proposals/1");
   assert.match(
     proposalEmbed.description ?? "",
-    /^Approved: Yes \(150\.00%\)\n\n\*\*Discussion:\*\* \[dev-account\/developer-tools]\(https:\/\/peakd\.com\/@dev-account\/developer-tools\)\n\n```\nCreator           Receiver\n@dev-account      @dev-account\nStart             End\n.+\nDays              Daily Pay\n\d[\d,]* of 3,653    10\.000 HBD\nTotal Votes \(HP\)  Voters\n1\.5M              2\n```\n\n\*\*Total Requested Pay:\*\* 36,530 HBD\n\nFunding developer tooling for the Hive ecosystem\.$/,
+    /^\*\*Status:\*\* Active\n\n\*\*Payment Result:\*\* 0 paid so far; requested up to 36,530\.000 HBD across 87,672 expected payments\n\n\*\*Current Votes vs Sweep:\*\* Above sweep \(150\.00%\)\n\n\*\*Discussion:\*\* \[dev-account\/developer-tools]\(https:\/\/peakd\.com\/@dev-account\/developer-tools\)\n\n```\nCreator           Receiver\n@dev-account      @dev-account\nStart             End\n.+\nDays              Daily Pay\n\d[\d,]* of 3,653    10\.000 HBD\nTotal Votes \(HP\)  Voters\n1\.5M              2\n```\n\n\*\*Timeline:\*\*\n```\n2020-01-01  Starts  10\.000 HBD \/ day\n2030-01-01  Ends\n```\n\nFunding developer tooling for the Hive ecosystem\.$/,
   );
   assert.equal(proposalEmbed.image?.url, "https://images.hive.blog/dev-tools.png");
-  assert.equal(proposalEmbed.footer?.text, "Hive DHF Proposal");
+  assert.equal(proposalEmbed.footer?.text, "Hive DHF Proposal | Hive RPC");
   assert.deepEqual(proposalEmbed.fields, undefined);
   const proposalListResponse = await commands.get("proposal")?.execute(context(commands, "proposal", { hive }), ["tools"]);
   const proposalComponents = (proposalListResponse as {
@@ -1216,9 +1291,29 @@ test("hive account commands use the injected Hive API", async () => {
     { customId: "proposal:0:1,3", label: "Previous", disabled: true },
     { customId: "proposal:1:1,3", label: "Next", disabled: false },
   ]);
+  const expiredProposalEmbed = embedJson<{ title?: string; description?: string }>(
+    await commands.get("proposal")?.execute(context(commands, "proposal", { hive, hiveSql }), ["4"]),
+  );
+  assert.equal(expiredProposalEmbed.title, "Proposal #4: Old developer work");
+  assert.match(
+    expiredProposalEmbed.description ?? "",
+    /^\*\*Status:\*\* Expired\n\n\*\*Payment Result:\*\* 17\.500 \/ 72\.500 HBD paid; 24\.14%; 7 \/ 240 expected payments\n\n\*\*Payment Coverage:\*\* 7 \/ 240 expected payments\n\n\*\*Current Votes vs Sweep:\*\* Above sweep \(200\.00%\)/,
+  );
+  assert.match(
+    expiredProposalEmbed.description ?? "",
+    /\*\*Timeline:\*\*\n```\n2020-12-20  Created  10\.000 HBD \/ day \| Old developer work \| old-developer-work\n2021-01-01  Starts   10\.000 HBD \/ day\n2021-01-05  Updated  5\.000 HBD \/ day \| Old developer work \| old-developer-work\n2021-01-11  Ends\n```\n\n\*\*Hive Hardfork:\*\* paid across Hive launch \(2020-03-20 14:00 UTC\)/,
+  );
+  const historicalProposalEmbed = embedJson<{ title?: string; description?: string }>(
+    await commands.get("proposal")?.execute(context(commands, "proposal", { hive, hiveSql }), ["63"]),
+  );
+  assert.equal(historicalProposalEmbed.title, "Proposal #63: Historical docs");
+  assert.match(
+    historicalProposalEmbed.description ?? "",
+    /^\*\*Status:\*\* Expired\n\n\*\*Payment Result:\*\* 1,234\.567 \/ 44,590\.000 HBD paid; 2\.77%; 124 \/ 2,184 expected payments/,
+  );
   assert.equal(
     await commands.get("proposal")?.execute(context(commands, "proposal", { hive }), ["missing-proposal"]),
-    'Proposal "missing-proposal" not found (or not active).',
+    'Proposal "missing-proposal" not found.',
   );
   assert.equal(
     await commands.get("consensus")?.execute(context(commands, "consensus", { hive }), ["2"]),
