@@ -3,6 +3,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   EmbedBuilder,
   StringSelectMenuBuilder,
   type ButtonInteraction,
@@ -10,10 +11,12 @@ import {
   type Message,
   type StringSelectMenuInteraction,
 } from "discord.js";
-import type { Command, CommandReplyOptions } from "./types.js";
+import { HyperionAgentClient } from "../hyperion/api.js";
+import type { Command, CommandContext, CommandReplyOptions } from "./types.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../../package.json") as { version: string };
+const hyperionAuthChallenges = new Map<string, string>();
 
 export const coreCommands: Command[] = [
   {
@@ -196,13 +199,21 @@ export const coreCommands: Command[] = [
 
       if (selectedName) {
         const command = registry.get(selectedName);
-        if (!command) return `Cannot find help for: ${selectedName}`;
+        if (!command || command.hidden) return `Cannot find help for: ${selectedName}`;
 
         return helpCommandEmbed(command, prefix, categoryLabels);
       }
 
       return paginatedHelpEmbed(visibleCommands(registry), prefix, categoryLabels);
     },
+  },
+  {
+    name: "hyperion-auth",
+    description: "Create or refresh Banjo's Hyperion bearer token.",
+    usage: "hyperion-auth [HYP-code]",
+    category: "core",
+    hidden: true,
+    execute: async (context, args) => hyperionAuthCommand(context, args),
   },
 ];
 
@@ -439,7 +450,8 @@ function isHelpInteraction(interaction: ButtonInteraction | StringSelectMenuInte
 }
 
 function visibleCommands(registry: Map<string, Command>): Command[] {
-  return [...new Map([...registry.values()].map((command) => [command.name, command])).values()];
+  return [...new Map([...registry.values()].map((command) => [command.name, command])).values()]
+    .filter((command) => !command.hidden);
 }
 
 function boundedPageIndex(value: number, pageCount: number): number {
@@ -508,6 +520,45 @@ function chunk<T>(items: T[], size: number): T[][] {
   }
 
   return chunks;
+}
+
+async function hyperionAuthCommand(context: CommandContext, args: string[]): Promise<string> {
+  const { config, message } = context;
+  if (message.channel.type !== ChannelType.DM || !config.hyperion.ownerIds.has(message.author.id)) {
+    return "Hyperion auth is only available in a DM from a configured bot owner.";
+  }
+
+  const hyperion = context.services?.hyperion ?? new HyperionAgentClient(config);
+  const code = args[0]?.trim().toUpperCase();
+
+  if (code) {
+    if (!/^HYP-[A-Z0-9-]+$/.test(code)) {
+      return "Paste only the Hyperion code beginning with `HYP-`.";
+    }
+
+    const challengeId = hyperionAuthChallenges.get(message.author.id);
+    if (!challengeId) {
+      return `No pending Hyperion auth challenge. Run \`${config.commandPrefix}hyperion-auth\` first.`;
+    }
+
+    const result = await hyperion.redeemAuthChallenge(challengeId, code);
+    hyperionAuthChallenges.delete(message.author.id);
+    return [
+      `Hyperion auth complete${result.accountName ? ` for @${result.accountName}` : ""}.`,
+      "Set this deployment secret outside the repo:",
+      `HYPERION_BEARER_TOKEN=${result.bearerToken}`,
+    ].join("\n");
+  }
+
+  const challenge = await hyperion.startAuthChallenge();
+  hyperionAuthChallenges.set(message.author.id, challenge.challengeId);
+  return [
+    "Open this HiveSigner link in your browser and complete the login there:",
+    challenge.hivesignerLoginUrl,
+    "",
+    "Do not paste any Hive key, password, posting key, active key, owner key, memo key, or signing credential into this chat.",
+    `When Hyperion shows a code beginning with \`HYP-\`, paste only that code here as \`${config.commandPrefix}hyperion-auth HYP-...\`.`,
+  ].join("\n");
 }
 
 type BirthdayEntry = {

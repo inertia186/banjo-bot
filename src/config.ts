@@ -17,6 +17,12 @@ export type AppConfig = {
   hafbe: {
     baseUrl: string | null;
   };
+  hyperion: {
+    baseUrl: string;
+    bearerToken: string | null;
+    digestLimit: number;
+    ownerIds: Set<string>;
+  };
   hiveSql: {
     provider: "hivesql" | "hafsql";
     enabled: boolean;
@@ -92,6 +98,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     hafbe: {
       baseUrl: env.HAFBE_BASE_URL?.replace(/\/+$/, "") || null,
+    },
+    hyperion: {
+      baseUrl: env.HYPERION_BASE_URL?.replace(/\/+$/, "") || "https://www.hyperion.zone",
+      bearerToken: env.HYPERION_BEARER_TOKEN ?? null,
+      digestLimit: readPositiveInteger(env.HYPERION_DIGEST_LIMIT, 10),
+      ownerIds: new Set((env.BANJO_OWNER_IDS ?? "")
+        .split(/[,\s]+/)
+        .map((id) => id.trim())
+        .filter(Boolean)),
     },
     hiveSql: {
       provider: env.HIVE_HISTORY_PROVIDER === "hafsql" ? "hafsql" : "hivesql",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
-import type { Client, Message } from "discord.js";
+import { ChannelType, type Client, type Message } from "discord.js";
 import { registerCommands } from "../src/commands/index.js";
 import { handleSplinterlandsInteraction } from "../src/commands/splinterlands.js";
 import type { Command, CommandContext } from "../src/commands/types.js";
@@ -11,6 +11,7 @@ import type { XkcdApi } from "../src/comics/xkcd.js";
 import type { HiveApi } from "../src/hive/api.js";
 import type { HiveEngineApi } from "../src/hive-engine/api.js";
 import type { ScotApi } from "../src/hive-engine/scot.js";
+import type { HyperionApi } from "../src/hyperion/api.js";
 import type { HiveNodeDirectory } from "../src/hive/nodes.js";
 import type { HiveSqlApi } from "../src/hivesql/api.js";
 import type { Logger } from "../src/logger.js";
@@ -50,6 +51,12 @@ const config: AppConfig = {
   },
   hafbe: {
     baseUrl: null,
+  },
+  hyperion: {
+    baseUrl: "https://hyperion.test",
+    bearerToken: null,
+    digestLimit: 10,
+    ownerIds: new Set(),
   },
   hiveSql: {
     provider: "hivesql",
@@ -103,7 +110,7 @@ function registry(): Map<string, Command> {
 function context(
   commands = registry(),
   commandName = "test",
-  services?: { hive?: HiveApi; hiveEngine?: HiveEngineApi; hiveNodes?: HiveNodeDirectory; hiveSql?: HiveSqlApi; market?: MarketApi; giphy?: GiphyApi; scot?: ScotApi; xkcd?: XkcdApi; splinterlands?: SplinterlandsApi; hivePostSummarizer?: HivePostSummarizer },
+  services?: { hive?: HiveApi; hiveEngine?: HiveEngineApi; hiveNodes?: HiveNodeDirectory; hiveSql?: HiveSqlApi; market?: MarketApi; giphy?: GiphyApi; scot?: ScotApi; xkcd?: XkcdApi; splinterlands?: SplinterlandsApi; hivePostSummarizer?: HivePostSummarizer; hyperion?: HyperionApi },
   message?: Partial<Message>,
 ): CommandContext {
   return {
@@ -237,6 +244,109 @@ test("help descriptions do not label commands as legacy", () => {
     .map((command) => command.name);
 
   assert.deepEqual(legacyDescriptions, []);
+});
+
+test("hidden Hyperion auth command is excluded from help and LLM catalog", async () => {
+  const commands = registry();
+  const helpResponse = await commands.get("help")?.execute(context(commands), []);
+
+  assert.equal(await commands.get("help")?.execute(context(commands), ["hyperion-auth"]), "Cannot find help for: hyperion-auth");
+  assert.doesNotMatch(JSON.stringify((helpResponse as { embeds: unknown[] }).embeds), /hyperion-auth/);
+});
+
+test("Hyperion auth command is restricted to configured owner DMs", async () => {
+  const commands = registry();
+  const command = commands.get("hyperion-auth");
+  const ownerConfig = {
+    ...config,
+    hyperion: {
+      ...config.hyperion,
+      ownerIds: new Set(["owner-1"]),
+    },
+  };
+  const fakeHyperion = {
+    startAuthChallenge: async () => {
+      throw new Error("should not start");
+    },
+  } as unknown as HyperionApi;
+
+  assert.equal(
+    await command?.execute({
+      ...context(commands, "hyperion-auth", { hyperion: fakeHyperion }, {
+        author: { id: "owner-1" },
+        channel: { type: ChannelType.GuildText },
+      } as Partial<Message>),
+      config: ownerConfig,
+    }, []),
+    "Hyperion auth is only available in a DM from a configured bot owner.",
+  );
+  assert.equal(
+    await command?.execute({
+      ...context(commands, "hyperion-auth", { hyperion: fakeHyperion }, {
+        author: { id: "not-owner" },
+        channel: { type: ChannelType.DM },
+      } as Partial<Message>),
+      config: ownerConfig,
+    }, []),
+    "Hyperion auth is only available in a DM from a configured bot owner.",
+  );
+});
+
+test("Hyperion auth command starts challenge and redeems HYP code", async () => {
+  const commands = registry();
+  const command = commands.get("hyperion-auth");
+  const ownerConfig = {
+    ...config,
+    hyperion: {
+      ...config.hyperion,
+      ownerIds: new Set(["owner-2"]),
+    },
+  };
+  const calls: string[] = [];
+  const fakeHyperion = {
+    startAuthChallenge: async () => {
+      calls.push("start");
+      return {
+        challengeId: "challenge-1",
+        hivesignerLoginUrl: "https://hivesigner.test/login",
+      };
+    },
+    redeemAuthChallenge: async (challengeId: string, code: string) => {
+      calls.push(`${challengeId}:${code}`);
+      return {
+        bearerToken: "hyp_at_new",
+        accountName: "banjo",
+      };
+    },
+  } as unknown as HyperionApi;
+  const ownerMessage = {
+    author: { id: "owner-2" },
+    channel: { type: ChannelType.DM },
+  } as Partial<Message>;
+
+  const start = await command?.execute({
+    ...context(commands, "hyperion-auth", { hyperion: fakeHyperion }, ownerMessage),
+    config: ownerConfig,
+  }, []);
+  assert.match(String(start), /https:\/\/hivesigner\.test\/login/);
+  assert.match(String(start), /Do not paste any Hive key/);
+  assert.match(String(start), /\$hyperion-auth HYP-\.\.\./);
+
+  assert.equal(
+    await command?.execute({
+      ...context(commands, "hyperion-auth", { hyperion: fakeHyperion }, ownerMessage),
+      config: ownerConfig,
+    }, ["not-a-code"]),
+    "Paste only the Hyperion code beginning with `HYP-`.",
+  );
+
+  const redeemed = await command?.execute({
+    ...context(commands, "hyperion-auth", { hyperion: fakeHyperion }, ownerMessage),
+    config: ownerConfig,
+  }, ["HYP-ABC123"]);
+  assert.match(String(redeemed), /Hyperion auth complete for @banjo/);
+  assert.match(String(redeemed), /HYPERION_BEARER_TOKEN=hyp_at_new/);
+  assert.deepEqual(calls, ["start", "challenge-1:HYP-ABC123"]);
 });
 
 test("explicitly disabled legacy commands keep their legacy messages", async () => {

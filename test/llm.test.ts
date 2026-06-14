@@ -8,6 +8,7 @@ import type { ResponseCreateParamsNonStreaming } from "openai/resources/response
 import type { Command } from "../src/commands/types.js";
 import type { AppConfig } from "../src/config.js";
 import type { HiveApi } from "../src/hive/api.js";
+import type { HyperionApi } from "../src/hyperion/api.js";
 import type { Logger } from "../src/logger.js";
 import { buildAmbientContextPrompt, buildCommandCatalog, buildContextPlannerInstructions, buildConversationKey, buildInstructions, buildLlmInput, isAgenticTaskRequest, isSimpleThanks, LlmChat, parseContextPlan, shouldPlanAmbientContext, trimDiscordReply } from "../src/llm/chat.js";
 import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "../src/llm/channel-context.js";
@@ -38,6 +39,12 @@ const config: AppConfig = {
   },
   hafbe: {
     baseUrl: null,
+  },
+  hyperion: {
+    baseUrl: "https://hyperion.test",
+    bearerToken: null,
+    digestLimit: 10,
+    ownerIds: new Set(),
   },
   hiveSql: {
     provider: "hivesql",
@@ -366,6 +373,16 @@ test("buildCommandCatalog lists real commands once with usage and aliases", () =
     execute: () => undefined,
   };
   assert.match(buildCommandCatalog(new Map([["search", searchCommand]]), "$"), /defaults to the last 24 hours/);
+
+  const hiddenCommand: Command = {
+    name: "hyperion-auth",
+    description: "Create or refresh Banjo's Hyperion bearer token.",
+    usage: "hyperion-auth [HYP-code]",
+    category: "core",
+    hidden: true,
+    execute: () => undefined,
+  };
+  assert.equal(buildCommandCatalog(new Map([["hyperion-auth", hiddenCommand]]), "$"), "");
 });
 
 test("buildInstructions tells the model not to invent commands and includes the catalog", () => {
@@ -615,6 +632,79 @@ test("HiveAmbientContextProvider formats live Hive context from injected APIs", 
   assert.match(context ?? "", /Market ticker latest: 0.250000 HBD\/HIVE/);
   assert.match(context ?? "", /created post \(@alice\/created-post/);
   assert.match(context ?? "", /trending post \(@bob\/trending-post/);
+});
+
+test("HiveAmbientContextProvider prefers Hyperion digest for current Hive context", async () => {
+  let hiveCalls = 0;
+  const hive = {
+    getDynamicGlobalProperties: async () => {
+      hiveCalls += 1;
+      return {};
+    },
+  } as unknown as HiveApi;
+  const hyperion = {
+    getDigest: async (options) => {
+      assert.deepEqual(options, { limit: 3 });
+      return {
+        raw: {
+          posts: [{
+            title: "Hyperion current post",
+            author: "alice",
+            permlink: "current-post",
+            category: "hive",
+            created: "2026-06-13T12:00:00",
+            summary: "A concise current digest item.",
+            vote_link: "https://hivesigner.test/vote",
+          }],
+        },
+      };
+    },
+  } as unknown as HyperionApi;
+  const provider = new HiveAmbientContextProvider({
+    ...config,
+    hyperion: {
+      ...config.hyperion,
+      bearerToken: "hyp_at_secret",
+      digestLimit: 3,
+    },
+  }, logger, hive, hyperion);
+  const context = await provider.contextFor("What's new on Hive today?");
+
+  assert.equal(hiveCalls, 0);
+  assert.match(context ?? "", /Hyperion unread digest/);
+  assert.match(context ?? "", /Hyperion current post/);
+  assert.match(context ?? "", /@alice\/current-post/);
+  assert.match(context ?? "", /vote link https:\/\/hivesigner\.test\/vote/);
+});
+
+test("HiveAmbientContextProvider falls back to Hive RPC when Hyperion digest fails", async () => {
+  const hive = {
+    getDynamicGlobalProperties: async () => ({
+      head_block_number: 456,
+      time: "2026-06-13T12:00:00",
+      total_vesting_fund_hive: "0.000 HIVE",
+      total_vesting_shares: "0.000000 VESTS",
+    }),
+    getMarketTicker: async () => ({ latest: "0.200000" }),
+    getFeedHistory: async () => ({ current_median_history: { base: "0.200 HBD", quote: "1.000 HIVE" } }),
+    getRankedPosts: async () => [],
+  } as unknown as HiveApi;
+  const hyperion = {
+    getDigest: async () => {
+      throw new Error("Hyperion API HTTP 401");
+    },
+  } as unknown as HyperionApi;
+  const provider = new HiveAmbientContextProvider({
+    ...config,
+    hyperion: {
+      ...config.hyperion,
+      bearerToken: "hyp_at_secret",
+    },
+  }, logger, hive, hyperion);
+  const context = await provider.contextFor("What's current on Hive?");
+
+  assert.match(context ?? "", /Head block: 456/);
+  assert.match(context ?? "", /Latest posts: none returned/);
 });
 
 test("HiveAmbientContextProvider checks handle-like prompts with Hive RPC only", async () => {

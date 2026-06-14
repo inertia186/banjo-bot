@@ -75,6 +75,17 @@ OPENAI_API_KEY=...
 
 LLM replies are intentionally separate from `$` commands. They cannot run moderation, voting, wallet, or admin behavior.
 
+For current Hive questions, Banjo can use Hyperion's authenticated unread digest as ambient context before falling back to public Hive RPC latest/trending posts.
+
+```env
+HYPERION_BASE_URL=https://www.hyperion.zone
+HYPERION_BEARER_TOKEN=...
+HYPERION_DIGEST_LIMIT=10
+BANJO_OWNER_IDS=237384510096801792
+```
+
+To create or refresh the token, a configured owner can DM Banjo with `$hyperion-auth`, open the returned HiveSigner link privately, then paste back only the displayed `HYP-*` code as `$hyperion-auth HYP-...`. Never paste Hive keys, HiveSigner passwords, or signing credentials into Discord.
+
 ## Hive Commands
 
 Banjo uses public Hive JSON-RPC nodes for read-only account commands like `$rep`, `$power`, `$proxy`, `$witness`, and `$avatar`.

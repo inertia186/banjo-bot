@@ -22,6 +22,12 @@ const config: AppConfig = {
   hafbe: {
     baseUrl: "https://hafbe.test/hafbe-api",
   },
+  hyperion: {
+    baseUrl: "https://hyperion.test",
+    bearerToken: null,
+    digestLimit: 10,
+    ownerIds: new Set(),
+  },
   hiveSql: {
     provider: "hivesql",
     enabled: false,

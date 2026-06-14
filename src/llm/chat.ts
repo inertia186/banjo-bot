@@ -169,7 +169,7 @@ export function buildCommandCatalog(commands: ReadonlyMap<string, Command> | und
   if (!commands) return "";
 
   const uniqueCommands = [...new Set(commands.values())].sort((left, right) => left.name.localeCompare(right.name));
-  return uniqueCommands.map((command) => {
+  return uniqueCommands.filter((command) => !command.hidden).map((command) => {
     const usage = command.usage ?? command.name;
     const aliases = (command.aliases ?? []).map((alias) => `${prefix}${alias}`).join(", ");
     const aliasText = aliases ? ` Aliases: ${aliases}.` : "";

@@ -14,6 +14,7 @@ import { handleHelpInteraction } from "./commands/core.js";
 import { registerCommands } from "./commands/index.js";
 import { handleNftShowroomInteraction, handleProposalInteraction, handleSearchInteraction, UserFacingCommandError } from "./commands/hive.js";
 import { handleSplinterlandsInteraction } from "./commands/splinterlands.js";
+import { HyperionAgentClient } from "./hyperion/api.js";
 import { LlmChat } from "./llm/chat.js";
 import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "./llm/channel-context.js";
 import { LlmConversationLeases } from "./llm/conversation-lease.js";
@@ -40,13 +41,14 @@ const client = new Client({
 });
 
 registerCommands(client);
+const hyperion = new HyperionAgentClient(config);
 const llmChat = new LlmChat(
   config,
   logger,
   undefined,
   client.commands,
   new CompositeAmbientContextProvider([
-    new HiveAmbientContextProvider(config, logger),
+    new HiveAmbientContextProvider(config, logger, undefined, hyperion),
     new HiveReferenceContextProvider(config, logger),
     new ChannelAmbientContextProvider(logger),
   ]),

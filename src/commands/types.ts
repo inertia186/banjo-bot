@@ -4,6 +4,7 @@ import type { XkcdApi } from "../comics/xkcd.js";
 import type { HiveApi } from "../hive/api.js";
 import type { HiveEngineApi } from "../hive-engine/api.js";
 import type { ScotApi } from "../hive-engine/scot.js";
+import type { HyperionApi } from "../hyperion/api.js";
 import type { HiveNodeDirectory } from "../hive/nodes.js";
 import type { HiveSqlApi } from "../hivesql/api.js";
 import type { Logger } from "../logger.js";
@@ -28,6 +29,7 @@ export type CommandContext = {
     xkcd?: XkcdApi;
     splinterlands?: SplinterlandsApi;
     hivePostSummarizer?: HivePostSummarizer;
+    hyperion?: HyperionApi;
   };
 };
 
@@ -37,6 +39,7 @@ export type Command = {
   description: string;
   usage?: string;
   category: "core" | "links" | "snarks" | "hive" | "legacy";
+  hidden?: boolean;
   execute(context: CommandContext, args: string[]): Promise<CommandResponse> | CommandResponse;
 };
 
