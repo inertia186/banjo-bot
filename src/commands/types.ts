@@ -7,6 +7,7 @@ import type { ScotApi } from "../hive-engine/scot.js";
 import type { HiveNodeDirectory } from "../hive/nodes.js";
 import type { HiveSqlApi } from "../hivesql/api.js";
 import type { Logger } from "../logger.js";
+import type { HivePostSummarizer } from "../llm/post-summary.js";
 import type { MarketApi } from "../market/api.js";
 import type { GiphyApi } from "../media/giphy.js";
 import type { SplinterlandsApi } from "../splinterlands/api.js";
@@ -26,6 +27,7 @@ export type CommandContext = {
     giphy?: GiphyApi;
     xkcd?: XkcdApi;
     splinterlands?: SplinterlandsApi;
+    hivePostSummarizer?: HivePostSummarizer;
   };
 };
 

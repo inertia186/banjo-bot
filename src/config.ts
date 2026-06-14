@@ -9,16 +9,33 @@ export type AppConfig = {
     nodes: string[];
     nodesSourceUrl: string;
   };
+  hiveReferences: {
+    whitepaperPath: string | null;
+    sourcePath: string | null;
+    maxAgeDays: number;
+  };
   hafbe: {
     baseUrl: string | null;
   };
   hiveSql: {
+    provider: "hivesql" | "hafsql";
     enabled: boolean;
     server: string;
     database: string;
     username: string | null;
     password: string | null;
     wildcardLimit: number;
+  };
+  hafSql: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    database: string;
+    username: string | null;
+    password: string | null;
+    ssl: boolean;
+    statementTimeoutMs: number;
+    maxPoolSize: number;
   };
   market: {
     coinGeckoBaseUrl: string;
@@ -68,16 +85,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       nodes: hiveNodes,
       nodesSourceUrl: env.HIVE_NODES_SOURCE_URL ?? "https://developers.hive.io/quickstart/hive_full_nodes.html",
     },
+    hiveReferences: {
+      whitepaperPath: env.HIVE_WHITEPAPER_TEXT_PATH ?? null,
+      sourcePath: env.HIVE_SOURCE_PATH ?? null,
+      maxAgeDays: readNonNegativeInteger(env.HIVE_REFERENCE_MAX_AGE_DAYS, 30),
+    },
     hafbe: {
       baseUrl: env.HAFBE_BASE_URL?.replace(/\/+$/, "") || null,
     },
     hiveSql: {
+      provider: env.HIVE_HISTORY_PROVIDER === "hafsql" ? "hafsql" : "hivesql",
       enabled: env.HIVESQL_ENABLED === "true",
       server: env.HIVESQL_HOST ?? "sql.hivesql.io",
       database: env.HIVESQL_DATABASE ?? "DBHive",
       username: env.HIVESQL_USERNAME ?? null,
       password: env.HIVESQL_PASSWORD ?? null,
       wildcardLimit: readPositiveInteger(env.HIVESQL_WILDCARD_LIMIT, 50),
+    },
+    hafSql: {
+      enabled: env.HAFSQL_ENABLED === "true",
+      host: env.HAFSQL_HOST ?? "hafsql-sql.mahdiyari.info",
+      port: readPositiveInteger(env.HAFSQL_PORT, 5432),
+      database: env.HAFSQL_DATABASE ?? "haf_block_log",
+      username: env.HAFSQL_USERNAME ?? null,
+      password: env.HAFSQL_PASSWORD ?? null,
+      ssl: env.HAFSQL_SSL === "true",
+      statementTimeoutMs: readPositiveInteger(env.HAFSQL_STATEMENT_TIMEOUT_MS, 8_000),
+      maxPoolSize: readPositiveInteger(env.HAFSQL_MAX_POOL_SIZE, 3),
     },
     market: {
       coinGeckoBaseUrl: env.COINGECKO_BASE_URL?.replace(/\/+$/, "") || "https://api.coingecko.com/api/v3",
@@ -108,4 +142,11 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readNonNegativeInteger(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }

@@ -4,7 +4,9 @@ import { HiveRpcClient, type HiveAccount, type HiveAccountOperation, type HiveAp
 import { HiveEngineRpcClient, type HiveEngineApi, type HiveEngineBalance, type HiveEngineBuyOrder, type HiveEngineMarketMetrics, type HiveEngineNft, type HiveEngineToken, type HiveEngineTrade, type NftShowroomArt } from "../hive-engine/api.js";
 import { ScotHttpClient, type ScotAccountHistoryEntry, type ScotApi, type ScotConfigEntry, type ScotDiscussion } from "../hive-engine/scot.js";
 import { HiveDeveloperNodeDirectory, type HiveNode, type HiveNodeDirectory } from "../hive/nodes.js";
+import { HafSqlClient } from "../hafsql/api.js";
 import { HiveSqlClient, type HiveSqlApi, type HiveSqlAppPayout, type HiveSqlBadge, type HiveSqlBadgeStats, type HiveSqlDistributionBucket, type HiveSqlDistributionSummary, type HiveSqlPromotedSummary, type HiveSqlProposalPayments, type HiveSqlProposalTimelineEvent, type HiveSqlSearchComment, type HiveSqlSearchOptions, type HiveSqlSearchResult, type HiveSqlTopKind, type HiveSqlTopPost, type HiveSqlTopPostOptions } from "../hivesql/api.js";
+import { OpenAiHivePostSummarizer, type HivePostSummarizer } from "../llm/post-summary.js";
 import { CoinGeckoMarketClient, type FearGreedIndex, type MarketApi, type MarketTicker } from "../market/api.js";
 import type { Logger } from "../logger.js";
 import { asEmbedResponse, banjoEmbed, dataField, truncateEmbedText } from "./embeds.js";
@@ -17,8 +19,10 @@ const nftsrButtonPrefix = "nftsr";
 const nftsrNoAccount = "~";
 const proposalButtonPrefix = "proposal";
 const proposalTxSelectId = "proposal-tx";
+const proposalSummaryReplies = new Map<string, { delete(): Promise<unknown> }>();
 const searchButtonPrefix = "search";
 const searchResultCache = new Map<string, { options: HiveSqlSearchOptions; result: HiveSqlSearchResult; posts: Map<string, HivePost | null>; createdAt: number }>();
+const searchSummaryReplies = new Map<string, { delete(): Promise<unknown> }>();
 let searchResultCacheCounter = 0;
 const proposalResultCache = new Map<string, ProposalResultCacheEntry>();
 
@@ -27,6 +31,7 @@ type ProposalDetailsCacheEntry = {
   payments: HiveSqlProposalPayments | null;
   timeline: HiveSqlProposalTimelineEvent[] | null;
   post: HivePost | null;
+  providerName: string | null;
 };
 
 type ProposalResultCacheEntry = {
@@ -222,12 +227,14 @@ export const hiveCommands: Command[] = [
   },
   {
     name: "search",
-    description: "Search recent Hive content.",
+    description: "Search Hive content; defaults to the last 24 hours.",
     usage: "search <terms...> [tag:name] [!tag:name] [after:YYYY-MM-DD] [before:YYYY-MM-DD]",
     category: "hive",
     execute: async (context, args) => {
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so content search is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so content search is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "content search");
+      if (unsupported) return unsupported;
 
       const parsed = parseSearchArgs(args);
       if (typeof parsed === "string") return parsed;
@@ -249,7 +256,9 @@ export const hiveCommands: Command[] = [
       if (unsupportedChain) return unsupportedChain;
 
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so promoted post lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so promoted post lookup is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "promoted post lookup");
+      if (unsupported) return unsupported;
 
       const [yesterday, today] = await Promise.all([
         hiveSql.getPromotedSummary("yesterday"),
@@ -266,7 +275,9 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so top post lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so top post lookup is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "top post lookup");
+      if (unsupported) return unsupported;
 
       const parsed = parseTopPostArgs(args);
       if (typeof parsed === "string") return parsed;
@@ -285,7 +296,9 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so app payout lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so app payout lookup is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "app payout lookup");
+      if (unsupported) return unsupported;
 
       const limit = readAppLimit(args[0]);
       if (typeof limit === "string") return limit;
@@ -303,7 +316,9 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so distribution lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so distribution lookup is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "distribution lookup");
+      if (unsupported) return unsupported;
 
       const daysAgo = readDistributionDays(args[0]);
       if (typeof daysAgo === "string") return daysAgo;
@@ -326,7 +341,9 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so badge search is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so badge search is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "badge search");
+      if (unsupported) return unsupported;
 
       const badges = await hiveSql.findBadges(args.map((arg) => arg.toLowerCase()), 20);
       if (badges.length === 0) return `Unable to find badges with: \`${args.join(" ")}\``;
@@ -341,7 +358,9 @@ export const hiveCommands: Command[] = [
     category: "hive",
     execute: async (context, args) => {
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so badge lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so badge lookup is unavailable.`;
+      const unsupported = unsupportedHafSqlLookup(hiveSql, "badge lookup");
+      if (unsupported) return unsupported;
 
       const badges = await hiveSql.findBadges(args.map((arg) => arg.toLowerCase()), 1);
       const badge = badges[0];
@@ -349,7 +368,11 @@ export const hiveCommands: Command[] = [
 
       const stats = await hiveSql.getBadgeStats(badge.name);
       const [hydratedBadge] = await hydrateBadges(context, [badge]);
-      return asEmbedResponse(formatBadge(hydratedBadge ?? badge, stats));
+      const hydratedStats = {
+        ...stats,
+        listedBy: await hydrateBadges(context, stats.listedBy),
+      };
+      return asEmbedResponse(formatBadge(hydratedBadge ?? badge, hydratedStats));
     },
   },
   {
@@ -431,7 +454,8 @@ export const hiveCommands: Command[] = [
       if (!account) return unknownAccount(accountName);
 
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so delegation lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so delegation lookup is unavailable.`;
+      const provider = historyProviderName(hiveSql);
 
       const direction = context.commandName === "delegator"
         ? "incoming"
@@ -458,7 +482,7 @@ export const hiveCommands: Command[] = [
         ].join("\n");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return `HiveSQL delegation lookup failed: ${message}`;
+        return `${provider} delegation lookup failed: ${message}`;
       }
     },
   },
@@ -473,14 +497,15 @@ export const hiveCommands: Command[] = [
       if (chainError) return chainError;
 
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so delegated account lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so delegated account lookup is unavailable.`;
+      const provider = historyProviderName(hiveSql);
 
       try {
         const delegatees = await hiveSql.getDelegateesByMinimumMvests(minMvests);
         return formatDelegatedAccounts(delegatees);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return `HiveSQL delegated account lookup failed: ${message}`;
+        return `${provider} delegated account lookup failed: ${message}`;
       }
     },
   },
@@ -495,13 +520,14 @@ export const hiveCommands: Command[] = [
       if (chainError) return chainError;
 
       const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so claim lookup is unavailable.";
+      if (!hiveSql) return `${configuredHistoryProviderName(context)} is not configured, so claim lookup is unavailable.`;
+      const provider = historyProviderName(hiveSql);
 
       try {
-        return asEmbedResponse(formatClaimSummary(await hiveSql.getClaimSummary(timeframe)));
+        return asEmbedResponse(formatClaimSummary(await hiveSql.getClaimSummary(timeframe), provider));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return `HiveSQL claim lookup failed: ${message}`;
+        return `${provider} claim lookup failed: ${message}`;
       }
     },
   },
@@ -514,14 +540,15 @@ export const hiveCommands: Command[] = [
       const chainError = requireHiveChain(args[0]);
       if (chainError) return chainError;
 
-      const hiveSql = hiveSqlApi(context);
-      if (!hiveSql) return "HiveSQL is not configured, so account summary lookup is unavailable.";
+      const hiveSql = accountSummaryApi(context);
+      if (!hiveSql) return "HafSQL or HiveSQL is not configured, so account summary lookup is unavailable.";
+      const provider = historyProviderName(hiveSql);
 
       try {
-        return asEmbedResponse(formatAccountSummary(await hiveSql.getAccountSummary()));
+        return asEmbedResponse(formatAccountSummary(await hiveSql.getAccountSummary(), provider));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return `HiveSQL account summary lookup failed: ${message}`;
+        return `${provider} account summary lookup failed: ${message}`;
       }
     },
   },
@@ -579,6 +606,25 @@ export const hiveCommands: Command[] = [
       }
 
       return asEmbedResponse(formatCalculatedRewardEmbed(post, rewardFund.reward_balance, feedHistory.current_median_history.base, feedHistory.current_median_history.quote));
+    },
+  },
+  {
+    name: "summarize",
+    aliases: ["summary"],
+    description: "Summarize a Hive post from the blockchain.",
+    usage: "summarize <url-or-@author/permlink|^>",
+    category: "hive",
+    execute: async (context, args) => {
+      const target = await resolvePostTarget(context, args[0], "summarize");
+      if (typeof target === "string") return target;
+
+      const post = await hiveApi(context).getPostCreation(target.ref.author, target.ref.permlink);
+      if (!post) return `Unable to find post @${target.ref.author}/${target.ref.permlink} on Hive.`;
+
+      const summary = await hivePostSummarizer(context).summarizePost(post);
+      if (!summary) return "LLM summarization is not configured.";
+
+      return asEmbedResponse(formatPostSummary(post, summary));
     },
   },
   {
@@ -1044,6 +1090,10 @@ function hiveApi(context: CommandContext): HiveApi {
   return context.services?.hive ?? new HiveRpcClient(context.config, context.logger);
 }
 
+function hivePostSummarizer(context: CommandContext): HivePostSummarizer {
+  return context.services?.hivePostSummarizer ?? new OpenAiHivePostSummarizer(context.config, context.logger);
+}
+
 function formatAccountOperation(operation: HiveAccountOperation): string {
   const json = JSON.stringify({ [operation.type]: operation.value }).replace(/`/g, "\\u0060");
   return `\`\`\`json\n${json}\n\`\`\``;
@@ -1150,8 +1200,36 @@ function accountMarkdownLink(accountName: string): string {
 
 function hiveSqlApi(context: CommandContext): HiveSqlApi | null {
   if (context.services?.hiveSql) return context.services.hiveSql;
-  if (!context.config.hiveSql.enabled) return null;
-  return new HiveSqlClient(context.config, context.logger);
+  return configuredHistoryApi(context.config, context.logger);
+}
+
+function accountSummaryApi(context: CommandContext): HiveSqlApi | null {
+  if (context.services?.hiveSql) return context.services.hiveSql;
+  if (context.config.hafSql.enabled) return new HafSqlClient(context.config, context.logger);
+  return configuredHistoryApi(context.config, context.logger);
+}
+
+function configuredHistoryApi(config: AppConfig, logger: Logger): HiveSqlApi | null {
+  if (config.hiveSql.provider === "hafsql") {
+    if (!config.hafSql.enabled) return null;
+    return new HafSqlClient(config, logger);
+  }
+  if (!config.hiveSql.enabled) return null;
+  return new HiveSqlClient(config, logger);
+}
+
+function historyProviderName(hiveSql: HiveSqlApi): string {
+  return hiveSql.providerName ?? "HiveSQL";
+}
+
+function configuredHistoryProviderName(context: CommandContext): string {
+  return context.config.hiveSql.provider === "hafsql" ? "HafSQL" : "HiveSQL";
+}
+
+function unsupportedHafSqlLookup(hiveSql: HiveSqlApi, lookup: string): string | null {
+  return historyProviderName(hiveSql) === "HafSQL"
+    ? `HafSQL ${lookup} is not implemented yet; switch HIVE_HISTORY_PROVIDER to hivesql for this command.`
+    : null;
 }
 
 async function requireAccount(context: CommandContext, args: string[]): Promise<HiveAccount> {
@@ -1185,8 +1263,9 @@ async function expandWildcardAccountNames(
 
   const hiveSql = hiveSqlApi(context);
   if (!hiveSql) {
-    return "HiveSQL is not configured, so wildcard account lookups are unavailable.";
+    return `${configuredHistoryProviderName(context)} is not configured, so wildcard account lookups are unavailable.`;
   }
+  const provider = historyProviderName(hiveSql);
 
   const names: string[] = [];
   const unmatchedPatterns: string[] = [];
@@ -1198,7 +1277,7 @@ async function expandWildcardAccountNames(
       matches = await hiveSql.findAccountNamesByPattern(pattern, context.config.hiveSql.wildcardLimit + 1);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return `HiveSQL wildcard lookup failed: ${message}`;
+      return `${provider} wildcard lookup failed: ${message}`;
     }
 
     if (matches.length === 0) {
@@ -1288,11 +1367,11 @@ function formatClaimSummary(summary: {
   rewardHbd: number;
   rewardHive: number;
   rewardVests: number;
-}): EmbedBuilder {
+}, providerName = "HiveSQL"): EmbedBuilder {
   const embed = banjoEmbed()
     .setTitle("Hive Reward Claims")
     .setDescription(summary.timeframe)
-    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+    .setFooter({ text: providerName, iconURL: HIVE_TOKEN_ICON_URL });
 
   embed.addFields([
     dataField("Claims", formatInteger(summary.count)),
@@ -1307,10 +1386,10 @@ function formatClaimSummary(summary: {
   return embed;
 }
 
-function formatAccountSummary(summary: { total: number; mined: number; communities: number; badges: number }): EmbedBuilder {
+function formatAccountSummary(summary: { total: number; mined: number; communities: number; badges: number }, providerName = "HiveSQL"): EmbedBuilder {
   const embed = banjoEmbed()
     .setTitle("Hive Accounts")
-    .setFooter({ text: "HiveSQL", iconURL: HIVE_TOKEN_ICON_URL });
+    .setFooter({ text: providerName, iconURL: HIVE_TOKEN_ICON_URL });
 
   embed.addFields([
     dataField("Total", formatInteger(summary.total)),
@@ -2117,13 +2196,24 @@ export async function handleProposalInteraction(interaction: ButtonInteraction |
   const request = parseProposalButtonId(interaction.customId);
   if (!request) return false;
 
+  const hive = new HiveRpcClient(config, logger);
+  const hiveSql = configuredHistoryApi(config, logger);
+
+  if (request.action === "summary") {
+    await interaction.deferReply();
+    await clearProposalSummaryReply(interaction);
+    const response = await formatProposalSummaryResponse(request, hive, hiveSql, new OpenAiHivePostSummarizer(config, logger));
+    await interaction.editReply(response);
+    await rememberProposalSummaryReply(interaction);
+    return true;
+  }
+
   await interaction.deferUpdate();
+  await clearProposalSummaryReply(interaction);
   await interaction.message.edit({ components: renderProposalLoadingComponents() }).catch(() => undefined);
 
   try {
     const cached = readProposalResultCache(proposalCacheKey(request.ids));
-    const hive = new HiveRpcClient(config, logger);
-    const hiveSql = config.hiveSql.enabled ? new HiveSqlClient(config, logger) : null;
     if (cached) {
       await interaction.message.edit(await formatProposalResponse({
         hive,
@@ -2174,6 +2264,42 @@ export async function handleProposalInteraction(interaction: ButtonInteraction |
   return true;
 }
 
+async function formatProposalSummaryResponse(
+  request: { selectedIndex: number; ids: number[] },
+  hive: HiveApi,
+  hiveSql: HiveSqlApi | null,
+  summarizer: HivePostSummarizer,
+) {
+  const cached = readProposalResultCache(proposalCacheKey(request.ids));
+  if (!cached) return { content: "That proposal result cache expired. Run the proposal lookup again." };
+
+  const proposal = cached.selected[Math.max(0, Math.min(request.selectedIndex, cached.selected.length - 1))];
+  if (!proposal) return { content: "No cached proposal to summarize." };
+
+  const details = await readProposalDetails(cached, proposal, hive, hiveSql);
+  if (!details.post) return { content: `Unable to find discussion post @${proposal.creator}/${proposal.permlink} on Hive.` };
+
+  const summary = await summarizer.summarizePost(details.post);
+  if (!summary) return { content: "LLM summarization is not configured." };
+
+  return { content: summary };
+}
+
+async function rememberProposalSummaryReply(interaction: ButtonInteraction): Promise<void> {
+  const reply = await interaction.fetchReply().catch(() => null);
+  if (reply && typeof (reply as { delete?: unknown }).delete === "function") {
+    proposalSummaryReplies.set(interaction.message.id, reply as { delete(): Promise<unknown> });
+  }
+}
+
+async function clearProposalSummaryReply(interaction: ButtonInteraction): Promise<void> {
+  const reply = proposalSummaryReplies.get(interaction.message.id);
+  if (!reply) return;
+
+  proposalSummaryReplies.delete(interaction.message.id);
+  await reply.delete().catch(() => undefined);
+}
+
 async function handleProposalTxInteraction(interaction: StringSelectMenuInteraction): Promise<boolean> {
   if (interaction.customId !== proposalTxSelectId) return false;
 
@@ -2204,15 +2330,21 @@ function proposalExplorerUrl(value: string | undefined): string | null {
   return null;
 }
 
-function parseProposalButtonId(customId: string): { selectedIndex: number; ids: number[] } | null {
-  const [prefix, selectedIndexValue, idsValue] = customId.split(":");
-  if (prefix !== proposalButtonPrefix || !idsValue) return null;
+function parseProposalButtonId(customId: string): { action: "page" | "summary"; selectedIndex: number; ids: number[] } | null {
+  const parts = customId.split(":");
+  const [prefix] = parts;
+  if (prefix !== proposalButtonPrefix) return null;
+
+  const action = parts[1] === "summary" ? "summary" : "page";
+  const selectedIndexValue = action === "summary" ? parts[2] : parts[1];
+  const idsValue = action === "summary" ? parts[3] : parts[2];
+  if (!idsValue) return null;
 
   const selectedIndex = Number.parseInt(selectedIndexValue ?? "", 10);
   const ids = idsValue.split(",").map((value) => Number.parseInt(value, 10)).filter(Number.isFinite);
   if (!Number.isFinite(selectedIndex) || selectedIndex < 0 || ids.length === 0) return null;
 
-  return { selectedIndex, ids };
+  return { action, selectedIndex, ids };
 }
 
 function formatScotTags(config: ScotConfigEntry[], symbols: string[]): string {
@@ -2465,21 +2597,38 @@ function formatSearchResultEmbed(options: HiveSqlSearchOptions, result: HiveSqlS
 }
 
 function renderSearchResultComponents(cacheId: string, resultCount: number, selectedIndex: number): Array<ActionRowBuilder<ButtonBuilder>> {
-  if (resultCount <= 1) return [];
+  if (resultCount <= 0) return [];
 
-  return [
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
+  const buttons: ButtonBuilder[] = [];
+  if (resultCount > 1) {
+    buttons.push(
       new ButtonBuilder()
         .setCustomId(searchButtonId(cacheId, selectedIndex - 1))
         .setLabel("Previous")
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(selectedIndex === 0),
+    );
+  }
+
+  buttons.push(
+    new ButtonBuilder()
+      .setCustomId(searchSummaryButtonId(cacheId, selectedIndex))
+      .setLabel("Summarize")
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  if (resultCount > 1) {
+    buttons.push(
       new ButtonBuilder()
         .setCustomId(searchButtonId(cacheId, selectedIndex + 1))
         .setLabel("Next")
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(selectedIndex >= resultCount - 1),
-    ),
+    );
+  }
+
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons),
   ];
 }
 
@@ -2487,29 +2636,101 @@ function searchButtonId(cacheId: string, selectedIndex: number): string {
   return [searchButtonPrefix, cacheId, Math.max(0, selectedIndex)].join(":");
 }
 
+function searchSummaryButtonId(cacheId: string, selectedIndex: number): string {
+  return [searchButtonPrefix, "summary", cacheId, Math.max(0, selectedIndex)].join(":");
+}
+
+function renderSearchLoadingComponents(): Array<ActionRowBuilder<ButtonBuilder>> {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${searchButtonPrefix}:loading`)
+        .setLabel("Loading...")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true),
+    ),
+  ];
+}
+
 export async function handleSearchInteraction(interaction: ButtonInteraction, config: AppConfig, logger: Logger): Promise<boolean> {
   const request = parseSearchButtonId(interaction.customId);
   if (!request) return false;
 
+  const hive = new HiveRpcClient(config, logger);
+  if (request.action === "summary") {
+    await interaction.deferReply();
+    await clearSearchSummaryReply(interaction);
+
+    if (!searchResultCache.has(request.cacheId)) {
+      await interaction.editReply({ content: "That search result cache expired. Run the search again." });
+      return true;
+    }
+
+    const summary = await formatSearchResultSummary(request.cacheId, request.selectedIndex, hive, new OpenAiHivePostSummarizer(config, logger));
+    await interaction.editReply(summary);
+    await rememberSearchSummaryReply(interaction);
+    return true;
+  }
+
   await interaction.deferUpdate();
+  await clearSearchSummaryReply(interaction);
 
   if (!searchResultCache.has(request.cacheId)) {
     await interaction.followUp({ content: "That search result cache expired. Run the search again.", flags: MessageFlags.Ephemeral });
     return true;
   }
 
-  await interaction.message.edit(await formatSearchResultPage(request.cacheId, request.selectedIndex, new HiveRpcClient(config, logger)));
+  await interaction.message.edit({ components: renderSearchLoadingComponents() }).catch(() => undefined);
+  await interaction.message.edit(await formatSearchResultPage(request.cacheId, request.selectedIndex, hive));
   return true;
 }
 
-function parseSearchButtonId(customId: string): { cacheId: string; selectedIndex: number } | null {
-  const [prefix, cacheId, selectedIndexValue] = customId.split(":");
-  if (prefix !== searchButtonPrefix || !cacheId) return null;
+async function rememberSearchSummaryReply(interaction: ButtonInteraction): Promise<void> {
+  const reply = await interaction.fetchReply().catch(() => null);
+  if (reply && typeof (reply as { delete?: unknown }).delete === "function") {
+    searchSummaryReplies.set(interaction.message.id, reply as { delete(): Promise<unknown> });
+  }
+}
+
+async function clearSearchSummaryReply(interaction: ButtonInteraction): Promise<void> {
+  const reply = searchSummaryReplies.get(interaction.message.id);
+  if (!reply) return;
+
+  searchSummaryReplies.delete(interaction.message.id);
+  await reply.delete().catch(() => undefined);
+}
+
+async function formatSearchResultSummary(cacheId: string, selectedIndex: number, hive: HiveApi, summarizer: HivePostSummarizer) {
+  const cached = searchResultCache.get(cacheId);
+  if (!cached) return { content: "That search result cache expired. Run the search again." };
+
+  const index = Math.max(0, Math.min(selectedIndex, cached.result.comments.length - 1));
+  const comment = cached.result.comments[index];
+  if (!comment) return { content: "No cached search result to summarize." };
+
+  const post = await hydrateSearchPost(cached, index, hive);
+  if (!post) return { content: `Unable to find post @${comment.author}/${comment.permlink} on Hive.` };
+
+  const summary = await summarizer.summarizePost(post);
+  if (!summary) return { content: "LLM summarization is not configured." };
+
+  return { content: summary };
+}
+
+function parseSearchButtonId(customId: string): { action: "page" | "summary"; cacheId: string; selectedIndex: number } | null {
+  const parts = customId.split(":");
+  const [prefix] = parts;
+  if (prefix !== searchButtonPrefix) return null;
+
+  const action = parts[1] === "summary" ? "summary" : "page";
+  const cacheId = action === "summary" ? parts[2] : parts[1];
+  const selectedIndexValue = action === "summary" ? parts[3] : parts[2];
+  if (!cacheId) return null;
 
   const selectedIndex = Number.parseInt(selectedIndexValue ?? "", 10);
   if (!Number.isFinite(selectedIndex) || selectedIndex < 0) return null;
 
-  return { cacheId, selectedIndex };
+  return { action, cacheId, selectedIndex };
 }
 
 function formatSearchTags(options: HiveSqlSearchOptions): string | null {
@@ -2545,24 +2766,31 @@ type CalculatedRewardTarget = {
 };
 
 async function resolveCalculatedRewardTarget(context: CommandContext, input: string | undefined): Promise<CalculatedRewardTarget | string> {
-  if (!input || input === "^") {
-    const ref = await findFollowUpPostRef(context.message);
-    return ref ? { ref, unfurl: false } : "Sorry, I wasn't paying attention.";
-  }
-
-  const normalizedInput = stripDiscordUrlSuppression(input);
-  const ref = parsePostRef(normalizedInput);
-  if (!ref) return "Usage: `$calcreward <url-or-@author/permlink>`";
+  const target = await resolvePostTarget(context, input, "calcreward");
+  if (typeof target === "string") return target;
 
   return {
-    ref,
-    unfurl: !isUrl(normalizedInput),
+    ref: target.ref,
+    unfurl: target.fromFollowUp ? false : !isUrl(target.input),
   };
+}
+
+async function resolvePostTarget(context: CommandContext, input: string | undefined, commandName: string): Promise<{ ref: { author: string; permlink: string }; input: string; fromFollowUp: boolean } | string> {
+  if (!input || input === "^") {
+    const ref = await findFollowUpPostRef(context.message);
+    return ref ? { ref, input: "^", fromFollowUp: true } : "Sorry, I wasn't paying attention.";
+  }
+
+  const normalizedInput = stripDiscordUrlSuppression(input).replace(/^`|`$/g, "");
+  const ref = parsePostRef(normalizedInput);
+  if (!ref) return `Usage: \`$${commandName} <url-or-@author/permlink${commandName === "summarize" ? "|^" : ""}>\``;
+
+  return { ref, input: normalizedInput, fromFollowUp: false };
 }
 
 async function findFollowUpPostRef(message: Message): Promise<{ author: string; permlink: string } | null> {
   const referencedMessage = typeof message.fetchReference === "function" ? await message.fetchReference().catch(() => null) : null;
-  const referencedRef = referencedMessage ? findPostUrlRefInText(referencedMessage.content) : null;
+  const referencedRef = referencedMessage ? findPostRefInMessage(referencedMessage) : null;
   if (referencedRef) return referencedRef;
 
   if (!message.channel || !("messages" in message.channel)) return null;
@@ -2572,18 +2800,42 @@ async function findFollowUpPostRef(message: Message): Promise<{ author: string; 
 
   const recentMessages = [...messages.values()].sort((left, right) => right.createdTimestamp - left.createdTimestamp);
   for (const recentMessage of recentMessages) {
-    const ref = findPostUrlRefInText(recentMessage.content);
+    const ref = findPostRefInMessage(recentMessage);
     if (ref) return ref;
   }
 
   return null;
 }
 
-function findPostUrlRefInText(content: string): { author: string; permlink: string } | null {
+function findPostRefInMessage(message: Message): { author: string; permlink: string } | null {
+  return findPostRefInText(messagePostRefText(message));
+}
+
+function messagePostRefText(message: Message): string {
+  const embedText = (message.embeds ?? []).flatMap((embed) => [
+    embed.title,
+    embed.description,
+    embed.url,
+    ...(embed.fields ?? []).flatMap((field) => [field.name, field.value]),
+  ]);
+  return [message.content, ...embedText]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+}
+
+function findPostRefInText(content: string): { author: string; permlink: string } | null {
   const urls = content.match(/https?:\/\/[^\s<>()]+/gi) ?? [];
   for (const url of urls) {
     const ref = parsePostRef(url.replace(/[),.?!]+$/g, ""));
     if (ref) return ref;
+  }
+
+  const rawRef = content.match(/(?:^|[\s`])@([a-z0-9][a-z0-9.-]{1,14}[a-z0-9])\/([a-z0-9][a-z0-9-]{0,255})(?=$|[\s`).,?!>])/i);
+  if (rawRef?.[1] && rawRef[2]) {
+    return {
+      author: rawRef[1].toLowerCase(),
+      permlink: rawRef[2],
+    };
   }
 
   return null;
@@ -2596,6 +2848,23 @@ function isUrl(value: string): boolean {
 function stripDiscordUrlSuppression(value: string): string {
   const trimmed = value.trim();
   return trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+}
+
+function formatPostSummary(post: HivePost, summary: string): EmbedBuilder {
+  const preview = proposalPostPreview(post);
+  const embed = banjoEmbed()
+    .setTitle(truncateEmbedText(post.title || `@${post.author}/${post.permlink}`, 256))
+    .setURL(canonicalPostUrl(post))
+    .setThumbnail(`https://images.hive.blog/u/${encodeURIComponent(post.author)}/avatar`)
+    .setDescription([
+      `[${post.author}/${post.permlink}](${canonicalPostUrl(post)})`,
+      post.created ? `Created ${post.created}` : null,
+      "",
+      truncateEmbedText(summary, 1_000),
+    ].filter((line) => line !== null).join("\n"));
+
+  if (preview.image) embed.setImage(preview.image);
+  return embed;
 }
 
 function calculatedRewardValues(post: HivePost, rewardBalance: string, feedBase: string, feedQuote: string): { pendingPayout: number; poolRatio: number | null } {
@@ -2825,7 +3094,7 @@ function formatBadges(badges: HiveSqlBadge[], args: string[]): EmbedBuilder {
   const lines = visibleBadges.map((badge) => {
     const profile = badgeProfile(badge);
     const name = profile.name ?? badge.name;
-    return `[${name}](https://peakd.com/b/${badge.name}#${slugify(name)}) by @${badge.recoveryAccount}`;
+    return `[${name}](${badgeUrl(badge.name, name)}) by @${badge.recoveryAccount}`;
   });
   const footer = badges.length === visibleBadges.length
     ? `${badges.length} ${badges.length === 1 ? "result" : "results"}`
@@ -2867,22 +3136,50 @@ function formatBadge(badge: HiveSqlBadge, stats: HiveSqlBadgeStats): EmbedBuilde
   const profile = badgeProfile(badge);
   const name = profile.name ?? badge.name;
   const created = badge.created ? new Date(badge.created) : null;
+  const url = badgeUrl(badge.name, name);
+  const avatarUrl = badgeAvatarUrl(badge.name);
   const embed = banjoEmbed()
     .setTitle(name)
-    .setURL(`https://peakd.com/b/${badge.name}#${slugify(name)}`)
-    .setThumbnail(`https://images.hive.blog/u/${badge.name}/avatar`)
+    .setURL(url)
+    .setAuthor({ name: `@${badge.name}`, iconURL: avatarUrl, url })
+    .setThumbnail(avatarUrl)
     .setFooter({ text: "PeakD Badge" });
 
   if (profile.about) embed.setDescription(truncateEmbedText(profile.about, 600));
 
+  const listedBy = formatListedByBadges(stats.listedBy, stats.listedByTotal);
   embed.addFields([
     dataField("Creator", `@${badge.recoveryAccount}`),
     dataField("Recipients", formatInteger(stats.recipients)),
     dataField("Subscribers", formatInteger(stats.subscribers)),
+    listedBy ? dataField("Listed By", listedBy, false) : null,
     dataField("Created", created ? `${formatRelativeAge(created)} ago (${formatUtc(created)} UTC)` : null, false),
   ].filter((field): field is NonNullable<typeof field> => field !== null));
 
   return embed;
+}
+
+function formatListedByBadges(badges: HiveSqlBadge[], total: number): string | null {
+  if (badges.length === 0) return null;
+
+  const visibleBadges = badges.slice(0, 5);
+  const links = visibleBadges.map((badge) => {
+    const profile = badgeProfile(badge);
+    const name = profile.name ?? badge.name;
+    return `[${name}](${badgeUrl(badge.name, name)})`;
+  });
+  const hiddenCount = Math.max(0, total - visibleBadges.length);
+  if (hiddenCount > 0) links.push(`+${formatInteger(hiddenCount)} more`);
+
+  return links.join(", ");
+}
+
+function badgeUrl(account: string, name: string): string {
+  return `https://peakd.com/b/${account}#${slugify(name)}`;
+}
+
+function badgeAvatarUrl(account: string): string {
+  return `https://images.hive.blog/u/${encodeURIComponent(account)}/avatar`;
 }
 
 function badgeProfile(badge: HiveSqlBadge): { name?: string; about?: string } {
@@ -3232,6 +3529,7 @@ async function formatProposalResponse(options: {
       payments: details.payments,
       timeline: details.timeline,
       post: details.post,
+      providerName: details.providerName,
     })],
     components: renderProposalComponents(options.selected, options.selectedIndex, details.timeline),
   };
@@ -3245,7 +3543,8 @@ async function readProposalDetails(
 ): Promise<ProposalDetailsCacheEntry> {
   const id = proposalId(proposal);
   const cached = cacheEntry.details.get(id);
-  if (cached) return cached;
+  const providerName = hiveSql ? historyProviderName(hiveSql) : null;
+  if (cached && cached.providerName === providerName) return cached;
 
   const [voters, post, timeline, payments] = await Promise.all([
     hive.listProposalVotesByProposal(id),
@@ -3258,6 +3557,7 @@ async function readProposalDetails(
     payments,
     timeline,
     post,
+    providerName,
   };
 
   cacheEntry.details.set(id, details);
@@ -3556,6 +3856,7 @@ function formatProposal(
     payments: HiveSqlProposalPayments | null;
     timeline: HiveSqlProposalTimelineEvent[] | null;
     post: HivePost | null;
+    providerName: string | null;
   },
 ): EmbedBuilder {
   const startDate = parseHiveDate(proposal.start_date);
@@ -3593,7 +3894,7 @@ function formatProposal(
   const embed = banjoEmbed()
     .setTitle(`Proposal #${proposalId(proposal)}: ${proposal.subject}`)
     .setURL(`https://peakd.com/proposals/${proposalId(proposal)}`)
-    .setFooter({ text: proposalFooterText(context.payments, context.timeline), iconURL: HIVE_TOKEN_ICON_URL });
+    .setFooter({ text: proposalFooterText(context.payments, context.timeline, context.providerName), iconURL: HIVE_TOKEN_ICON_URL });
 
   embed.setDescription([
     proposal.status ? `**Status:** ${capitalizeWord(proposal.status)}` : null,
@@ -3677,8 +3978,9 @@ function proposalPaymentResultSummary(
 function proposalFooterText(
   payments: HiveSqlProposalPayments | null,
   timeline: HiveSqlProposalTimelineEvent[] | null,
+  providerName: string | null,
 ): string {
-  return payments || timeline ? "Hive DHF Proposal | Hive RPC + HiveSQL" : "Hive DHF Proposal | Hive RPC";
+  return payments || timeline ? `Hive DHF Proposal | Hive RPC + ${providerName ?? "HiveSQL"}` : "Hive DHF Proposal | Hive RPC";
 }
 
 function proposalPaymentCoverageSummary(
@@ -4030,18 +4332,37 @@ function renderProposalComponents(
   const ids = selected.map((proposal) => proposalId(proposal));
   const rows: Array<ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>> = [];
 
-  if (selected.length > 1) {
+  if (selected.length > 0) {
+    const buttons: ButtonBuilder[] = [];
+    if (selected.length > 1) {
+      buttons.push(
+        new ButtonBuilder()
+          .setCustomId(proposalButtonId(ids, selectedIndex - 1))
+          .setLabel("Previous")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(selectedIndex === 0),
+      );
+    }
+
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(proposalSummaryButtonId(ids, selectedIndex))
+        .setLabel("Summarize")
+        .setStyle(ButtonStyle.Primary),
+    );
+
+    if (selected.length > 1) {
+      buttons.push(
+        new ButtonBuilder()
+          .setCustomId(proposalButtonId(ids, selectedIndex + 1))
+          .setLabel("Next")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(selectedIndex >= selected.length - 1),
+      );
+    }
+
     rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(proposalButtonId(ids, selectedIndex - 1))
-        .setLabel("Previous")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(selectedIndex === 0),
-      new ButtonBuilder()
-        .setCustomId(proposalButtonId(ids, selectedIndex + 1))
-        .setLabel("Next")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(selectedIndex >= selected.length - 1),
+      ...buttons,
     ));
   }
 
@@ -4115,6 +4436,10 @@ function proposalTimelineExplorerTarget(event: HiveSqlProposalTimelineEvent): st
 
 function proposalButtonId(ids: number[], selectedIndex: number): string {
   return [proposalButtonPrefix, Math.max(0, selectedIndex), ids.join(",")].join(":");
+}
+
+function proposalSummaryButtonId(ids: number[], selectedIndex: number): string {
+  return [proposalButtonPrefix, "summary", Math.max(0, selectedIndex), ids.join(",")].join(":");
 }
 
 function proposalPostPreview(post: HivePost | null): { description?: string; image?: string } {
@@ -4302,7 +4627,7 @@ function topPostUrl(kind: HiveSqlTopKind, post: { author: string; permlink: stri
 function parsePostRef(value: string | undefined): { author: string; permlink: string } | null {
   if (!value) return null;
 
-  const normalized = normalizeHiveUrl(value.trim());
+  const normalized = normalizeHiveUrl(value.trim().replace(/^`|`$/g, ""));
   const path = postPath(normalized);
   const match = path.match(/(?:^|\/)@([^/]+)\/([^/?#]+)/);
   if (!match?.[1] || !match[2]) return null;

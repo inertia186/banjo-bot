@@ -14,12 +14,19 @@ import type { ScotApi } from "../src/hive-engine/scot.js";
 import type { HiveNodeDirectory } from "../src/hive/nodes.js";
 import type { HiveSqlApi } from "../src/hivesql/api.js";
 import type { Logger } from "../src/logger.js";
+import type { HivePostSummarizer } from "../src/llm/post-summary.js";
 import type { MarketApi } from "../src/market/api.js";
 import type { GiphyApi } from "../src/media/giphy.js";
 import type { SplinterlandsApi } from "../src/splinterlands/api.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
+
+function recentUtcTimestamp(daysAgo: number, hour = 0): string {
+  const timestamp = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+  timestamp.setUTCHours(hour, 0, 0, 0);
+  return timestamp.toISOString().slice(0, 19);
+}
 
 const logger: Logger = {
   info: () => undefined,
@@ -36,16 +43,33 @@ const config: AppConfig = {
     nodes: ["https://example.test"],
     nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
   },
+  hiveReferences: {
+    whitepaperPath: null,
+    sourcePath: null,
+    maxAgeDays: 30,
+  },
   hafbe: {
     baseUrl: null,
   },
   hiveSql: {
+    provider: "hivesql",
     enabled: false,
     server: "sql.hivesql.io",
     database: "DBHive",
     username: null,
     password: null,
     wildcardLimit: 50,
+  },
+  hafSql: {
+    enabled: false,
+    host: "hafsql.test",
+    port: 5432,
+    database: "haf_block_log",
+    username: null,
+    password: null,
+    ssl: false,
+    statementTimeoutMs: 8_000,
+    maxPoolSize: 3,
   },
   market: {
     coinGeckoBaseUrl: "https://coingecko.test",
@@ -79,7 +103,7 @@ function registry(): Map<string, Command> {
 function context(
   commands = registry(),
   commandName = "test",
-  services?: { hive?: HiveApi; hiveEngine?: HiveEngineApi; hiveNodes?: HiveNodeDirectory; hiveSql?: HiveSqlApi; market?: MarketApi; giphy?: GiphyApi; scot?: ScotApi; xkcd?: XkcdApi; splinterlands?: SplinterlandsApi },
+  services?: { hive?: HiveApi; hiveEngine?: HiveEngineApi; hiveNodes?: HiveNodeDirectory; hiveSql?: HiveSqlApi; market?: MarketApi; giphy?: GiphyApi; scot?: ScotApi; xkcd?: XkcdApi; splinterlands?: SplinterlandsApi; hivePostSummarizer?: HivePostSummarizer },
   message?: Partial<Message>,
 ): CommandContext {
   return {
@@ -119,6 +143,7 @@ test("registerCommands registers aliases to the same command", () => {
   assert.equal(commands.get("catfacts"), commands.get("catfact"));
   assert.equal(commands.get("splinter"), commands.get("splinterlands"));
   assert.equal(commands.get("spl"), commands.get("splinterlands"));
+  assert.equal(commands.get("summary"), commands.get("summarize"));
 });
 
 test("help lists each command once despite aliases", async () => {
@@ -857,6 +882,12 @@ test("hive account commands use the injected Hive API", async () => {
                 recovery_account: "livecreator",
               }
             : {}),
+          ...(name === "badge-999"
+            ? {
+                posting_json_metadata: JSON.stringify({ profile: { name: "Qualified PeakD Badges" } }),
+                recovery_account: "peakd",
+              }
+            : {}),
           proxy: "",
           voting_power: 7500,
           last_vote_time: "2999-01-01T00:00:00",
@@ -1324,35 +1355,35 @@ test("hive account commands use the injected Hive API", async () => {
       {
         token: "LEO",
         type: "staking_reward",
-        timestamp: "2026-05-14T00:00:00",
+        timestamp: recentUtcTimestamp(5),
         int_amount: 1500,
         precision: 3,
       },
       {
         token: "LEO",
         type: "curation_reward",
-        timestamp: "2026-05-15T00:00:00",
+        timestamp: recentUtcTimestamp(4),
         int_amount: 2500,
         precision: 3,
       },
       {
         token: "LEO",
         type: "author_reward",
-        timestamp: "2026-05-16T00:00:00",
+        timestamp: recentUtcTimestamp(3),
         int_amount: 5000,
         precision: 3,
       },
       {
         token: "LEO",
         type: "comment_benefactor_reward",
-        timestamp: "2026-05-16T12:00:00",
+        timestamp: recentUtcTimestamp(3, 12),
         int_amount: 1000,
         precision: 3,
       },
       {
         token: "LEO",
         type: "mining_reward",
-        timestamp: "2026-05-16T18:00:00",
+        timestamp: recentUtcTimestamp(3, 18),
         int_amount: 2000,
         precision: 3,
       },
@@ -1378,6 +1409,16 @@ test("hive account commands use the injected Hive API", async () => {
           total: 81,
           authorCount: 20,
           comments: [],
+        };
+      }
+
+      if (options.keywords.includes("single")) {
+        return {
+          total: 1,
+          authorCount: 1,
+          comments: [
+            { author: "alice", permlink: "banjo-notes", title: "Banjo Notes", created: new Date("2026-05-16T00:00:00Z") },
+          ],
         };
       }
 
@@ -1523,10 +1564,26 @@ test("hive account commands use the injected Hive API", async () => {
       ]
         .filter((badge) => terms.length === 0 || terms.some((term) => badge.name.includes(term) || badge.jsonMetadata.toLowerCase().includes(term)))
         .slice(0, limit),
-    getBadgeStats: async () => ({
-      recipients: 12,
-      subscribers: 3,
-    }),
+    getBadgeStats: async (account) => account === "badge-123"
+      ? {
+          recipients: 12,
+          subscribers: 3,
+          listedBy: [
+            {
+              name: "badge-999",
+              recoveryAccount: "peakd",
+              jsonMetadata: JSON.stringify({ profile: { name: "Qualified Badges" } }),
+              created: new Date("2021-03-04T05:06:07Z"),
+            },
+          ],
+          listedByTotal: 1,
+        }
+      : {
+          recipients: 5,
+          subscribers: 1,
+          listedBy: [],
+          listedByTotal: 0,
+        },
     getDelegations: async (_account, direction) =>
       direction === "incoming"
         ? [
@@ -1556,6 +1613,10 @@ test("hive account commands use the injected Hive API", async () => {
       communities: 3_210,
       badges: 456,
     }),
+  };
+  const hafSql: HiveSqlApi = {
+    ...hiveSql,
+    providerName: "HafSQL",
   };
   const hiveNodes: HiveNodeDirectory = {
     getPublicNodes: async () => [
@@ -1697,6 +1758,7 @@ test("hive account commands use the injected Hive API", async () => {
     disabled: component.disabled ?? false,
   })), [
     { customId: "proposal:0:1,3", label: "Previous", disabled: true },
+    { customId: "proposal:summary:0:1,3", label: "Summarize", disabled: false },
     { customId: "proposal:1:1,3", label: "Next", disabled: false },
   ]);
   const expiredProposalEmbed = embedJson<{ title?: string; description?: string }>(
@@ -1833,6 +1895,10 @@ test("hive account commands use the injected Hive API", async () => {
     { name: "Unique Accounts", value: "2", inline: true },
     { name: "Rewards", value: "1.250 HBD / 2.500 HIVE / 4.250 MVESTS", inline: false },
   ]);
+  const hafSqlClaimsEmbed = embedJson<{ footer?: { text: string } }>(
+    await commands.get("claims")?.execute(context(commands, "claims", { hiveSql: hafSql }), []),
+  );
+  assert.equal(hafSqlClaimsEmbed.footer?.text, "HafSQL");
   const yesterdayClaimsEmbed = embedJson<{
     description?: string;
     fields?: Array<{ name: string; value: string; inline?: boolean }>;
@@ -1870,13 +1936,17 @@ test("hive account commands use the injected Hive API", async () => {
     { name: "Communities", value: "3,210", inline: true },
     { name: "Badges", value: "456", inline: true },
   ]);
+  const hafSqlAccountsEmbed = embedJson<{ footer?: { text: string } }>(
+    await commands.get("accounts")?.execute(context(commands, "accounts", { hiveSql: hafSql }), []),
+  );
+  assert.equal(hafSqlAccountsEmbed.footer?.text, "HafSQL");
   assert.equal(
     await commands.get("accounts")?.execute(context(commands, "accounts", { hiveSql }), ["steem"]),
     "Chain `steem` is not configured in this Banjo build.",
   );
   assert.equal(
     await commands.get("accounts")?.execute(context(commands, "accounts"), []),
-    "HiveSQL is not configured, so account summary lookup is unavailable.",
+    "HafSQL or HiveSQL is not configured, so account summary lookup is unavailable.",
   );
   const searchEmbed = embedJson<{
     title?: string;
@@ -1911,12 +1981,28 @@ test("hive account commands use the injected Hive API", async () => {
     components: Array<{ toJSON(): { components: Array<{ type?: number; style?: number; custom_id?: string; label?: string; disabled?: boolean }> } }>;
   }).components[0]?.toJSON().components;
   assert.deepEqual(searchComponents?.map((component) => ({
-    customId: component.custom_id?.replace(/^search:[^:]+:/, "search:<cache>:"),
+    customId: component.custom_id?.startsWith("search:summary:")
+      ? component.custom_id.replace(/^search:summary:[^:]+:/, "search:summary:<cache>:")
+      : component.custom_id?.replace(/^search:[^:]+:/, "search:<cache>:"),
     label: component.label,
     disabled: component.disabled ?? false,
   })), [
     { customId: "search:<cache>:0", label: "Previous", disabled: true },
+    { customId: "search:summary:<cache>:0", label: "Summarize", disabled: false },
     { customId: "search:<cache>:1", label: "Next", disabled: false },
+  ]);
+  const singleSearchResponse = await commands.get("search")?.execute(context(commands, "search", { hive, hiveSql }), ["single"]);
+  const singleSearchComponents = (singleSearchResponse as {
+    components: Array<{ toJSON(): { components: Array<{ custom_id?: string; label?: string; disabled?: boolean }> } }>;
+  }).components[0]?.toJSON().components;
+  assert.deepEqual(singleSearchComponents?.map((component) => ({
+    customId: component.custom_id?.startsWith("search:summary:")
+      ? component.custom_id.replace(/^search:summary:[^:]+:/, "search:summary:<cache>:")
+      : component.custom_id,
+    label: component.label,
+    disabled: component.disabled ?? false,
+  })), [
+    { customId: "search:summary:<cache>:0", label: "Summarize", disabled: false },
   ]);
   assert.equal(
     await commands.get("search")?.execute(context(commands, "search", { hiveSql }), ["none"]),
@@ -2076,16 +2162,21 @@ test("hive account commands use the injected Hive API", async () => {
   const badgesEmbed = embedJson<{
     title?: string;
     description?: string;
+    thumbnail?: { url: string };
+    author?: { name: string; icon_url?: string; url?: string };
     footer?: { text: string };
   }>(await commands.get("badges")?.execute(context(commands, "badges", { hive, hiveSql }), ["helpful"]));
   assert.equal(badgesEmbed.title, "Latest Badges matching: helpful");
   assert.equal(badgesEmbed.description, "[Fresh Helper](https://peakd.com/b/badge-123#fresh-helper) by @livecreator");
+  assert.equal(badgesEmbed.thumbnail, undefined);
+  assert.equal(badgesEmbed.author, undefined);
   assert.equal(badgesEmbed.footer?.text, "1 result");
   const badgeEmbed = embedJson<{
     title?: string;
     url?: string;
     description?: string;
     thumbnail?: { url: string };
+    author?: { name: string; icon_url?: string; url?: string };
     footer?: { text: string };
     fields?: Array<{ name: string; value: string; inline?: boolean }>;
   }>(await commands.get("badge")?.execute(context(commands, "badge", { hive, hiveSql }), ["helpful"]));
@@ -2093,14 +2184,24 @@ test("hive account commands use the injected Hive API", async () => {
   assert.equal(badgeEmbed.url, "https://peakd.com/b/badge-123#fresh-helper");
   assert.equal(badgeEmbed.description, "Fresh profile from live Hive.");
   assert.equal(badgeEmbed.thumbnail?.url, "https://images.hive.blog/u/badge-123/avatar");
+  assert.deepEqual(badgeEmbed.author, {
+    name: "@badge-123",
+    icon_url: "https://images.hive.blog/u/badge-123/avatar",
+    url: "https://peakd.com/b/badge-123#fresh-helper",
+  });
   assert.equal(badgeEmbed.footer?.text, "PeakD Badge");
   assert.deepEqual(badgeEmbed.fields, [
     { name: "Creator", value: "@livecreator", inline: true },
     { name: "Recipients", value: "12", inline: true },
     { name: "Subscribers", value: "3", inline: true },
-    { name: "Created", value: badgeEmbed.fields?.[3]?.value ?? "", inline: false },
+    { name: "Listed By", value: "[Qualified PeakD Badges](https://peakd.com/b/badge-999#qualified-peakd-badges)", inline: false },
+    { name: "Created", value: badgeEmbed.fields?.[4]?.value ?? "", inline: false },
   ]);
-  assert.match(badgeEmbed.fields?.[3]?.value ?? "", /^.+ ago \(2021-01-02 03:04 UTC\)$/);
+  assert.match(badgeEmbed.fields?.[4]?.value ?? "", /^.+ ago \(2021-01-02 03:04 UTC\)$/);
+  const unlistedBadgeEmbed = embedJson<{
+    fields?: Array<{ name: string; value: string; inline?: boolean }>;
+  }>(await commands.get("badge")?.execute(context(commands, "badge", { hive, hiveSql }), ["builder"]));
+  assert.equal(unlistedBadgeEmbed.fields?.some((field) => field.name === "Listed By"), false);
   assert.equal(
     await commands.get("badges")?.execute(context(commands, "badges"), []),
     "HiveSQL is not configured, so badge search is unavailable.",
@@ -2244,6 +2345,75 @@ test("hive account commands use the injected Hive API", async () => {
   assert.equal(
     await commands.get("calcreward")?.execute(context(commands, "calcreward", { hive }), []),
     "Sorry, I wasn't paying attention.",
+  );
+  const hivePostSummarizer: HivePostSummarizer = {
+    summarizePost: async (post) => `LLM summary for @${post.author}/${post.permlink}.`,
+  };
+  const summaryEmbed = embedJson<{
+    title?: string;
+    url?: string;
+    description?: string;
+    thumbnail?: { url: string };
+    image?: { url: string };
+  }>(await commands.get("summarize")?.execute(context(commands, "summarize", { hive, hivePostSummarizer }), ["`@alice/banjo-notes`"]));
+  assert.equal(summaryEmbed.title, "Banjo Notes");
+  assert.equal(summaryEmbed.url, "https://hive.blog/@alice/banjo-notes");
+  assert.equal(summaryEmbed.description, [
+    "[alice/banjo-notes](https://hive.blog/@alice/banjo-notes)",
+    "Created 2026-05-16T00:00:00",
+    "",
+    "LLM summary for @alice/banjo-notes.",
+  ].join("\n"));
+  assert.equal(summaryEmbed.thumbnail?.url, "https://images.hive.blog/u/alice/avatar");
+  assert.equal(summaryEmbed.image?.url, "https://images.hive.blog/banjo-notes.png");
+  const latestSummaryEmbed = embedJson<{ title?: string; url?: string }>(
+    await commands.get("summarize")?.execute(
+      context(commands, "summarize", { hive, hivePostSummarizer }, {
+        id: "500",
+        channel: {
+          messages: {
+            fetch: async () => new Map<string, Message>([
+              ["100", { content: "Earlier: @alice/banjo-notes", createdTimestamp: 1000 } as Message],
+            ]),
+          },
+        } as unknown as Message["channel"],
+      }),
+      ["^"],
+    ),
+  );
+  assert.equal(latestSummaryEmbed.title, "Banjo Notes");
+  assert.equal(latestSummaryEmbed.url, "https://hive.blog/@alice/banjo-notes");
+  const latestEmbedSummary = embedJson<{ title?: string; url?: string }>(
+    await commands.get("summarize")?.execute(
+      context(commands, "summarize", { hive, hivePostSummarizer }, {
+        id: "501",
+        channel: {
+          messages: {
+            fetch: async () => new Map<string, Message>([
+              ["100", {
+                content: "",
+                createdTimestamp: 1000,
+                embeds: [{ description: "[alice/banjo-notes](https://hive.blog/@alice/banjo-notes)" }],
+              } as Message],
+            ]),
+          },
+        } as unknown as Message["channel"],
+      }),
+      ["^"],
+    ),
+  );
+  assert.equal(latestEmbedSummary.title, "Banjo Notes");
+  assert.equal(latestEmbedSummary.url, "https://hive.blog/@alice/banjo-notes");
+  assert.equal(
+    await commands.get("summarize")?.execute(context(commands, "summarize", { hive, hivePostSummarizer }), ["@alice/not-there"]),
+    "Unable to find post @alice/not-there on Hive.",
+  );
+  assert.equal(
+    await commands.get("summarize")?.execute(context(commands, "summarize", {
+      hive,
+      hivePostSummarizer: { summarizePost: async () => null },
+    }), ["@alice/banjo-notes"]),
+    "LLM summarization is not configured.",
   );
   const nodesEmbed = embedJson<{
     title?: string;

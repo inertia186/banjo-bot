@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
+import { mkdir, utimes, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
+import { tmpdir } from "node:os";
 import { ChannelType, type Message } from "discord.js";
 import type { ResponseCreateParamsNonStreaming } from "openai/resources/responses/responses";
 import type { Command } from "../src/commands/types.js";
 import type { AppConfig } from "../src/config.js";
 import type { HiveApi } from "../src/hive/api.js";
 import type { Logger } from "../src/logger.js";
-import { buildCommandCatalog, buildConversationKey, buildInstructions, buildLlmInput, isAgenticTaskRequest, LlmChat, trimDiscordReply } from "../src/llm/chat.js";
+import { buildAmbientContextPrompt, buildCommandCatalog, buildContextPlannerInstructions, buildConversationKey, buildInstructions, buildLlmInput, isAgenticTaskRequest, isSimpleThanks, LlmChat, parseContextPlan, shouldPlanAmbientContext, trimDiscordReply } from "../src/llm/chat.js";
 import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "../src/llm/channel-context.js";
 import { LlmConversationLeases } from "../src/llm/conversation-lease.js";
 import { HiveAmbientContextProvider, wantsHiveAmbientContext } from "../src/llm/hive-context.js";
+import { HiveReferenceContextProvider, wantsHiveReferenceContext } from "../src/llm/hive-reference-context.js";
 import { llmPrompt } from "../src/llm/prompt.js";
 
 const logger: Logger = {
@@ -27,16 +31,33 @@ const config: AppConfig = {
     nodes: ["https://example.test"],
     nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
   },
+  hiveReferences: {
+    whitepaperPath: null,
+    sourcePath: null,
+    maxAgeDays: 30,
+  },
   hafbe: {
     baseUrl: null,
   },
   hiveSql: {
+    provider: "hivesql",
     enabled: false,
     server: "sql.hivesql.io",
     database: "DBHive",
     username: null,
     password: null,
     wildcardLimit: 50,
+  },
+  hafSql: {
+    enabled: false,
+    host: "hafsql.test",
+    port: 5432,
+    database: "haf_block_log",
+    username: null,
+    password: null,
+    ssl: false,
+    statementTimeoutMs: 8_000,
+    maxPoolSize: 3,
   },
   market: {
     coinGeckoBaseUrl: "https://coingecko.test",
@@ -167,6 +188,19 @@ function channelHistoryMessage(id: string, authorName: string, content: string, 
   } as unknown as Message;
 }
 
+function banjoEmbedHistoryMessage(id: string, description: string, createdTimestamp: number): Message {
+  return {
+    ...channelHistoryMessage(id, "Banjo", "", createdTimestamp, true),
+    author: {
+      id: "banjo-id",
+      bot: true,
+      displayName: "Banjo",
+      username: "banjo",
+    },
+    embeds: [{ title: "Banjo Notes", description, url: "https://hive.blog/@alice/banjo-notes", fields: [] }],
+  } as unknown as Message;
+}
+
 test("llmPrompt returns trimmed DM content", () => {
   assert.equal(llmPrompt(dmMessage("  hello Banjo  "), "$"), "hello Banjo");
 });
@@ -277,11 +311,16 @@ test("buildInstructions incorporates the Ruby gpt-prompt persona", () => {
   assert.match(instructions, /hard to explain to outsiders/);
   assert.match(instructions, /do not overuse phrases like "uphill marketing battle"/);
   assert.match(instructions, /active siege/);
+  assert.match(instructions, /Answer the user's exact question first/);
+  assert.match(instructions, /do not append a protocol\/source-code detour/);
   assert.match(instructions, /Do not overstate broad adoption/);
   assert.match(instructions, /collapse "they" into shared agency/);
   assert.match(instructions, /Be cautious with detailed protocol mechanics/);
   assert.match(instructions, /modest, caveated wording/);
   assert.match(instructions, /avoid pretending to be an authority on every edge case/);
+  assert.match(instructions, /Hive Developer Portal search URL/);
+  assert.match(instructions, /https:\/\/developers\.hive\.io\/search\/\?q=follow/);
+  assert.match(instructions, /url-encoded short topic/);
   assert.match(instructions, /reward-allocation signal/);
   assert.match(instructions, /votes and downvotes affect rshares/);
   assert.match(instructions, /claims move already accrued reward balances/);
@@ -290,6 +329,9 @@ test("buildInstructions incorporates the Ruby gpt-prompt persona", () => {
   assert.match(instructions, /\$claims and \$rewards show realized or account-level reward activity/);
   assert.match(instructions, /Do not say that \$claims or \$rewards reveal pending reward allocation/);
   assert.match(instructions, /no single command that fully answers where pending rewards are going right now/);
+  assert.match(instructions, /custom_json operation with id "follow"/);
+  assert.match(instructions, /Unfollow clears that state with "what": \[\]/);
+  assert.match(instructions, /\["ignore"\] is mute\/ignore/);
   assert.match(instructions, /authors often experience flags personally/);
   assert.match(instructions, /cannot perform moderation, voting, wallet, follow, blockchain, or admin actions/);
   assert.match(instructions, /perform an agentic task, refuse with exactly: Make it yourself\./);
@@ -315,13 +357,38 @@ test("buildCommandCatalog lists real commands once with usage and aliases", () =
     buildCommandCatalog(registry, "$"),
     "$help [command]: List available commands. Aliases: $halp.",
   );
+
+  const searchCommand: Command = {
+    name: "search",
+    description: "Search Hive content; defaults to the last 24 hours.",
+    usage: "search <terms...> [after:YYYY-MM-DD]",
+    category: "hive",
+    execute: () => undefined,
+  };
+  assert.match(buildCommandCatalog(new Map([["search", searchCommand]]), "$"), /defaults to the last 24 hours/);
 });
 
 test("buildInstructions tells the model not to invent commands and includes the catalog", () => {
   const instructions = buildInstructions("$rep <account>: Look up a Hive account reputation score.");
 
   assert.match(instructions, /Never invent \$ commands/);
+  assert.match(instructions, /exact command they can try/);
+  assert.match(instructions, /Do not claim you ran it/);
+  assert.match(instructions, /\$search, remember it defaults to the last 24 hours/);
+  assert.match(instructions, /after:YYYY-MM-DD/);
+  assert.match(instructions, /Prefer direct instructions/);
+  assert.match(instructions, /try \.\.\./);
+  assert.match(instructions, /Hive-shaped post links/);
+  assert.match(instructions, /decline to summarize/);
   assert.match(instructions, /\$rep <account>: Look up a Hive account reputation score/);
+});
+
+test("buildInstructions keeps bounded Discord context quiet", () => {
+  const instructions = buildInstructions();
+
+  assert.match(instructions, /answer naturally/);
+  assert.match(instructions, /without announcing that you searched/);
+  assert.match(instructions, /Do not imply global Discord access/);
 });
 
 test("trimDiscordReply suppresses blank and refusal-only responses", () => {
@@ -345,10 +412,32 @@ test("isAgenticTaskRequest detects task requests without blocking questions", ()
   assert.equal(isAgenticTaskRequest("$top upvoted and summarize the post"), true);
 });
 
+test("isSimpleThanks detects direct thanks only", () => {
+  assert.equal(isSimpleThanks("Thanks!"), true);
+  assert.equal(isSimpleThanks("thank you"), true);
+  assert.equal(isSimpleThanks("thx."), true);
+  assert.equal(isSimpleThanks("thanks for explaining follows"), false);
+});
+
 test("wantsHiveAmbientContext detects casual current Hive questions", () => {
   assert.equal(wantsHiveAmbientContext("What's new on Hive today?"), true);
   assert.equal(wantsHiveAmbientContext("What's the current Hive market doing?"), true);
   assert.equal(wantsHiveAmbientContext("What is Hive?"), false);
+});
+
+test("LlmChat replies deterministically to simple thanks without calling the provider", async () => {
+  let called = false;
+  const chat = new LlmChat(config, logger, {
+    responses: {
+      create: async () => {
+        called = true;
+        return { output_text: "No problem." };
+      },
+    },
+  });
+
+  assert.equal(await chat.replyTo(dmMessage("Thanks!"), "Thanks!"), "My pleasure.");
+  assert.equal(called, false);
 });
 
 test("LlmChat replies like $make for agentic task requests without calling the provider", async () => {
@@ -398,6 +487,97 @@ test("LlmChat includes ambient Hive context for casual current-chain questions",
   assert.match(JSON.stringify(requests[0]?.input), /Real post/);
 });
 
+test("LlmChat includes recent user turns when asking for ambient context", async () => {
+  const prompts: string[] = [];
+  const chat = new LlmChat(config, logger, {
+    responses: {
+      create: async () => ({ output_text: "Sure." }),
+    },
+  }, undefined, {
+    contextFor: async (prompt) => {
+      prompts.push(prompt);
+      return null;
+    },
+  });
+
+  await chat.replyTo(dmMessage("Tell me about noganoo"), "Tell me about noganoo");
+  await chat.replyTo(dmMessage("It's a handle."), "It's a handle.");
+
+  assert.equal(prompts[0], "Tell me about noganoo");
+  assert.equal(prompts[1], "Tell me about noganoo\nIt's a handle.");
+});
+
+test("buildAmbientContextPrompt keeps recent user subjects for terse follow-ups", () => {
+  assert.equal(
+    buildAmbientContextPrompt([
+      { role: "user", content: "Tell me about noganoo" },
+      { role: "assistant", content: "Which platform?" },
+      { role: "user", content: "Does discord chat search work?" },
+    ], "It's a handle."),
+    "Tell me about noganoo\nDoes discord chat search work?\nIt's a handle.",
+  );
+});
+
+test("shouldPlanAmbientContext selects identity and follow-up context questions", () => {
+  assert.equal(shouldPlanAmbientContext([], "Tell me about noganoo"), true);
+  assert.equal(shouldPlanAmbientContext([], "who is @alice?"), true);
+  assert.equal(shouldPlanAmbientContext([{ role: "user", content: "Tell me about noganoo" }], "It's a handle."), true);
+  assert.equal(shouldPlanAmbientContext([], "hello banjo"), false);
+});
+
+test("parseContextPlan accepts only allowlisted context hints", () => {
+  assert.equal(
+    parseContextPlan(JSON.stringify({
+      search_query: "noganoo handle",
+      hive_account: "@noganoo",
+      hive_current: true,
+      hivesql: "nope",
+    })),
+    [
+      "Context planner current-channel query: noganoo handle",
+      "Context planner Hive RPC account candidate: noganoo",
+      "Context planner wants current Hive chain/market context.",
+    ].join("\n"),
+  );
+  assert.equal(parseContextPlan("not json"), null);
+  assert.equal(parseContextPlan(JSON.stringify({ hive_account: "not a valid account name way too long" })), null);
+});
+
+test("buildContextPlannerInstructions forbids HiveSQL and broad searches", () => {
+  const instructions = buildContextPlannerInstructions();
+
+  assert.match(instructions, /Allowed context only/);
+  assert.match(instructions, /direct Hive RPC post lookup/);
+  assert.match(instructions, /Forbidden context: HiveSQL/);
+  assert.match(instructions, /global Discord search/);
+});
+
+test("LlmChat uses a hidden context plan before ambient context for ambiguous lookups", async () => {
+  const requests: ResponseCreateParamsNonStreaming[] = [];
+  const ambientPrompts: string[] = [];
+  const chat = new LlmChat(config, logger, {
+    responses: {
+      create: async (body: ResponseCreateParamsNonStreaming) => {
+        requests.push(body);
+        return requests.length === 1
+          ? { output_text: JSON.stringify({ search_query: "noganoo handle", hive_account: "noganoo", hive_current: false }) }
+          : { output_text: "Noganoo is a Hive account-shaped handle." };
+      },
+    },
+  }, undefined, {
+    contextFor: async (prompt) => {
+      ambientPrompts.push(prompt);
+      return "Hive account @noganoo: found.";
+    },
+  });
+
+  assert.equal(await chat.replyTo(dmMessage("Tell me about noganoo"), "Tell me about noganoo"), "Noganoo is a Hive account-shaped handle.");
+  assert.equal(requests.length, 2);
+  assert.match(requests[0]?.instructions ?? "", /hidden context planner/);
+  assert.match(ambientPrompts[0] ?? "", /Context planner current-channel query: noganoo handle/);
+  assert.match(ambientPrompts[0] ?? "", /Context planner Hive RPC account candidate: noganoo/);
+});
+
 test("HiveAmbientContextProvider formats live Hive context from injected APIs", async () => {
   const hive = {
     getDynamicGlobalProperties: async () => ({
@@ -437,6 +617,176 @@ test("HiveAmbientContextProvider formats live Hive context from injected APIs", 
   assert.match(context ?? "", /trending post \(@bob\/trending-post/);
 });
 
+test("HiveAmbientContextProvider checks handle-like prompts with Hive RPC only", async () => {
+  const calls: string[] = [];
+  const hive = {
+    getAccount: async (name: string) => {
+      calls.push(name);
+      return {
+        name,
+        created: "2020-01-02T03:04:05",
+        posting_json_metadata: JSON.stringify({
+          profile: {
+            name: "Noganoo",
+            about: "Tiny noodle syndicate.",
+            website: "https://example.test",
+          },
+        }),
+      };
+    },
+  } as unknown as HiveApi;
+  const provider = new HiveAmbientContextProvider(config, logger, hive);
+  const context = await provider.contextFor("Tell me about noganoo\nIt's a handle.");
+
+  assert.deepEqual(calls, ["noganoo"]);
+  assert.match(context ?? "", /direct Hive RPC account lookup/);
+  assert.match(context ?? "", /not a HiveSQL\/person\/content search/);
+  assert.match(context ?? "", /Hive account @noganoo: found/);
+  assert.match(context ?? "", /Profile about: Tiny noodle syndicate/);
+});
+
+test("HiveAmbientContextProvider reports missing handle-like Hive accounts without HiveSQL search", async () => {
+  const calls: string[] = [];
+  const hive = {
+    getAccount: async (name: string) => {
+      calls.push(name);
+      return null;
+    },
+  } as unknown as HiveApi;
+  const provider = new HiveAmbientContextProvider(config, logger, hive);
+  const context = await provider.contextFor("Tell me about noganoo");
+
+  assert.deepEqual(calls, ["noganoo"]);
+  assert.match(context ?? "", /Hive account @noganoo: no account returned by Hive RPC/);
+  assert.match(context ?? "", /not a HiveSQL\/person\/content search/);
+});
+
+test("wantsHiveReferenceContext detects source-backed Hive questions", () => {
+  assert.equal(wantsHiveReferenceContext("What does the Hive whitepaper say about witnesses?"), true);
+  assert.equal(wantsHiveReferenceContext("Where in the Hive source code are rewards handled?"), true);
+  assert.equal(wantsHiveReferenceContext("If I broadcast a Hive follow operation, how does it serialize?"), true);
+  assert.equal(wantsHiveReferenceContext("How do Hive follows work?"), false);
+  assert.equal(wantsHiveReferenceContext("What's new on Hive today?"), false);
+});
+
+test("HiveReferenceContextProvider loads fresh local whitepaper and source excerpts", async () => {
+  const root = join(tmpdir(), `banjo-ref-${Date.now()}`);
+  const sourceRoot = join(root, "source");
+  await mkdir(sourceRoot, { recursive: true });
+  const whitepaperPath = join(root, "whitepaper.txt");
+  const sourcePath = join(sourceRoot, "reward.cpp");
+  await writeFile(whitepaperPath, [
+    "Witness voting secures Hive consensus and block production.",
+    "",
+    "Rewards use rshares to allocate the reward pool among posts.",
+  ].join("\n"));
+  await writeFile(sourcePath, [
+    "void process_reward_pool() {",
+    "  // rshares decide reward claims for Hive posts",
+    "}",
+  ].join("\n"));
+
+  const provider = new HiveReferenceContextProvider({
+    ...config,
+    hiveReferences: { whitepaperPath, sourcePath: sourceRoot, maxAgeDays: 30 },
+  }, logger);
+  const context = await provider.contextFor("Where in the Hive source code and whitepaper are rshares rewards described?");
+
+  assert.match(context ?? "", /Local Hive reference context/);
+  assert.match(context ?? "", /Whitepaper excerpts/);
+  assert.match(context ?? "", /rshares/);
+  assert.match(context ?? "", /Source excerpts/);
+  assert.match(context ?? "", /reward.cpp/);
+});
+
+test("HiveReferenceContextProvider declines when references are missing or stale", async () => {
+  const missingProvider = new HiveReferenceContextProvider(config, logger);
+  const missingContext = await missingProvider.contextFor("What does the Hive whitepaper say about witnesses?") ?? "";
+  assert.match(missingContext, /not configured/);
+  assert.match(missingContext, /developers\.hive\.io\/search\/\?q=follow/);
+
+  const root = join(tmpdir(), `banjo-stale-ref-${Date.now()}`);
+  const sourceRoot = join(root, "source");
+  await mkdir(sourceRoot, { recursive: true });
+  const whitepaperPath = join(root, "whitepaper.txt");
+  const sourcePath = join(sourceRoot, "witness.cpp");
+  await writeFile(whitepaperPath, "Witness content.");
+  await writeFile(sourcePath, "witness code");
+  const stale = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+  await utimes(whitepaperPath, stale, stale);
+  await utimes(sourcePath, stale, stale);
+
+  const staleProvider = new HiveReferenceContextProvider({
+    ...config,
+    hiveReferences: { whitepaperPath, sourcePath: sourceRoot, maxAgeDays: 1 },
+  }, logger);
+  assert.match(await staleProvider.contextFor("What does the Hive whitepaper say about witnesses?") ?? "", /older than 1 days/);
+});
+
+test("HiveAmbientContextProvider summarizes Hive-shaped post links through Hive RPC", async () => {
+  const calls: Array<[string, string]> = [];
+  const hive = {
+    getPostCreation: async (author: string, permlink: string) => {
+      calls.push([author, permlink]);
+      return {
+        author,
+        permlink,
+        title: "A Chain-Native Note",
+        created: "2026-05-18T12:00:00",
+        body: "Here is **the post** with [a link](https://example.test) and useful detail.",
+        pending_payout_value: "1.000 HBD",
+      };
+    },
+  } as unknown as HiveApi;
+  const provider = new HiveAmbientContextProvider(config, logger, hive);
+  const context = await provider.contextFor("summarize https://peakd.com/hive-123/@alice/chain-native-note");
+
+  assert.deepEqual(calls, [["alice", "chain-native-note"]]);
+  assert.match(context ?? "", /direct Hive RPC get_content lookup/);
+  assert.match(context ?? "", /not a web fetch/);
+  assert.match(context ?? "", /Hive post @alice\/chain-native-note: found/);
+  assert.match(context ?? "", /Title: A Chain-Native Note/);
+  assert.match(context ?? "", /Body excerpt:/);
+});
+
+test("HiveAmbientContextProvider summarizes backticked @author/permlink refs through Hive RPC", async () => {
+  const calls: Array<[string, string]> = [];
+  const hive = {
+    getPostCreation: async (author: string, permlink: string) => {
+      calls.push([author, permlink]);
+      return {
+        author,
+        permlink,
+        title: "Profile",
+        created: "2026-05-18T12:00:00",
+        body: "Profile post body.",
+      };
+    },
+  } as unknown as HiveApi;
+  const provider = new HiveAmbientContextProvider(config, logger, hive);
+  const context = await provider.contextFor("Summarize the post: `@inertia/profile`");
+
+  assert.deepEqual(calls, [["inertia", "profile"]]);
+  assert.match(context ?? "", /Hive post @inertia\/profile: found/);
+  assert.match(context ?? "", /Title: Profile/);
+});
+
+test("HiveAmbientContextProvider declines missing Hive-shaped post summaries", async () => {
+  const calls: Array<[string, string]> = [];
+  const hive = {
+    getPostCreation: async (author: string, permlink: string) => {
+      calls.push([author, permlink]);
+      return null;
+    },
+  } as unknown as HiveApi;
+  const provider = new HiveAmbientContextProvider(config, logger, hive);
+  const context = await provider.contextFor("tl;dr @alice/not-on-hive");
+
+  assert.deepEqual(calls, [["alice", "not-on-hive"]]);
+  assert.match(context ?? "", /no post returned by Hive RPC/);
+  assert.match(context ?? "", /decline to summarize/);
+});
+
 test("ChannelAmbientContextProvider searches prior current-channel messages for relevant excerpts", async () => {
   const current = channelSearchMessage("500", "why don't they market hive?", [
     channelHistoryMessage("100", "alice", "We tried a banner campaign and it fizzled.", 1000),
@@ -451,6 +801,19 @@ test("ChannelAmbientContextProvider searches prior current-channel messages for 
   assert.match(context ?? "", /Hive marketing is hard/);
   assert.doesNotMatch(context ?? "", /marketing bot noise/);
   assert.doesNotMatch(context ?? "", /lunch thread/);
+});
+
+test("ChannelAmbientContextProvider can use Banjo's own embed replies as context", async () => {
+  const current = channelSearchMessage("500", "summarize banjo notes", [
+    banjoEmbedHistoryMessage("100", "[alice/banjo-notes](https://hive.blog/@alice/banjo-notes)\nA closer look at Banjo search results.", 1000),
+    channelHistoryMessage("200", "otherbot", "banjo notes from a different bot", 2000, true),
+  ]);
+  const provider = new ChannelAmbientContextProvider(logger);
+  const context = await provider.contextFor("Summarize Banjo Notes", current);
+
+  assert.match(context ?? "", /Banjo \(bot\):/);
+  assert.match(context ?? "", /alice\/banjo-notes/);
+  assert.doesNotMatch(context ?? "", /different bot/);
 });
 
 test("ChannelAmbientContextProvider includes relevant messages from a 10-year-old same-channel slice", async () => {

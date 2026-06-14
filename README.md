@@ -1,5 +1,10 @@
 # Banjo Bot
 
+[![Node.js >=22](https://img.shields.io/badge/node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/typescript-5.8-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Discord.js](https://img.shields.io/badge/discord.js-14-5865f2?logo=discord&logoColor=white)](https://discord.js.org/)
+[![License: CC0-1.0](https://img.shields.io/badge/license-CC0--1.0-lightgrey)](LICENSE)
+
 Banjo is a modern reimplementation of the legacy Ruby Discord bot at:
 
 `inertia186/banjo_bot`
@@ -83,6 +88,7 @@ COINGECKO_BASE_URL=https://api.coingecko.com/api/v3
 Wildcard account lookups, such as `$mvests inertia*`, optionally use HiveSQL.
 
 ```env
+HIVE_HISTORY_PROVIDER=hivesql
 HIVESQL_ENABLED=true
 HIVESQL_HOST=sql.hivesql.io
 HIVESQL_DATABASE=DBHive
@@ -90,6 +96,31 @@ HIVESQL_USERNAME=...
 HIVESQL_PASSWORD=...
 HIVESQL_WILDCARD_LIMIT=50
 ```
+
+Banjo can also use HafSQL for the first slice of historical reports: wildcard account expansion, delegation lookups, reward-claim summaries, account totals, and DHF proposal payment/update history. `$accounts` prefers HafSQL whenever it is configured, even if the default historical provider remains HiveSQL.
+
+```env
+HIVE_HISTORY_PROVIDER=hafsql
+HAFSQL_ENABLED=true
+HAFSQL_HOST=hafsql-sql.mahdiyari.info
+HAFSQL_PORT=5432
+HAFSQL_DATABASE=haf_block_log
+HAFSQL_USERNAME=...
+HAFSQL_PASSWORD=...
+HAFSQL_SSL=false
+HAFSQL_STATEMENT_TIMEOUT_MS=8000
+HAFSQL_MAX_POOL_SIZE=3
+```
+
+### HiveSQL vs HafSQL
+
+Banjo keeps both historical SQL adapters because they answer slightly different questions.
+
+Use HafSQL when a command is naturally operation- or account-history-shaped: account expansion, vesting delegations, reward claims, account totals, proposal update/payment history, and other reports that benefit from HAF operation ids, block/timestamp slicing, or parsed chain-operation tables. HafSQL is also the preferred source for `$accounts` when configured.
+
+Use HiveSQL when a command expects richer emulated state, especially final or current content-oriented records. HiveSQL is older and has a different design philosophy, but that can be useful for commands that want interpreted comment state after edits, content/tag search semantics, payout/app reports, promoted-post summaries, badge/follow conventions, or existing HiveSQL-specific report behavior.
+
+Commands still backed only by HiveSQL, such as `$search`, `$top`, `$app`, `$promoted`, `$distribution`, and PeakD badge lookups, will report that HafSQL support is not implemented yet when `HIVE_HISTORY_PROVIDER=hafsql`. Some of these may move later after command-by-command parity checks rather than as a blanket adapter swap.
 
 ## Migration Notes
 

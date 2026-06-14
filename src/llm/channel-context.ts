@@ -51,7 +51,7 @@ export class ChannelAmbientContextProvider implements AmbientContextProvider {
 
     try {
       const messages = await fetchContextMessages(message);
-      const excerpts = rankMessages(messages, terms, message.author.id);
+      const excerpts = rankMessages(messages, terms, message.author.id, message.client.user?.id ?? null);
       if (excerpts.length === 0) return null;
 
       return trimContext([
@@ -142,16 +142,17 @@ function snowflakeFromTimestamp(timestamp: number): string {
 }
 
 
-function rankMessages(messages: Message[], terms: string[], requesterId: string): string[] {
+function rankMessages(messages: Message[], terms: string[], requesterId: string, botUserId: string | null): string[] {
   return messages
-    .filter((message) => !message.author.bot)
-    .filter((message) => message.author.id !== requesterId || message.content.trim().length > 0)
-    .map((message) => ({ message, score: scoreMessage(message.content, terms) }))
+    .filter((message) => !message.author.bot || message.author.id === botUserId)
+    .map((message) => ({ message, text: messageSearchText(message) }))
+    .filter(({ message, text }) => message.author.id !== requesterId || text.trim().length > 0)
+    .map(({ message, text }) => ({ message, text, score: scoreMessage(text, terms) }))
     .filter(({ score }) => score > 0)
     .sort((left, right) => right.score - left.score || right.message.createdTimestamp - left.message.createdTimestamp)
     .slice(0, MAX_CONTEXT_MESSAGES)
     .sort((left, right) => left.message.createdTimestamp - right.message.createdTimestamp)
-    .map(({ message }) => formatMessage(message));
+    .map(({ message, text }) => formatMessage(message, text));
 }
 
 function scoreMessage(content: string, terms: string[]): number {
@@ -159,11 +160,24 @@ function scoreMessage(content: string, terms: string[]): number {
   return terms.reduce((score, term) => score + (normalized.includes(term) ? 1 : 0), 0);
 }
 
-function formatMessage(message: Message): string {
+function formatMessage(message: Message, text = messageSearchText(message)): string {
   const author = message.member?.displayName ?? message.author.displayName ?? message.author.username;
-  const excerpt = trimExcerpt(message.content.replace(/\s+/g, " ").trim());
+  const authorLabel = message.author.bot ? `${author} (bot)` : author;
+  const excerpt = trimExcerpt(text.replace(/\s+/g, " ").trim());
   const when = message.createdAt ? message.createdAt.toISOString() : new Date(message.createdTimestamp).toISOString();
-  return `${when} ${author}: ${excerpt}`;
+  return `${when} ${authorLabel}: ${excerpt}`;
+}
+
+function messageSearchText(message: Message): string {
+  const embedText = (message.embeds ?? []).flatMap((embed) => [
+    embed.title,
+    embed.description,
+    embed.url,
+    ...(embed.fields ?? []).flatMap((field) => [field.name, field.value]),
+  ]);
+  return [message.content, ...embedText]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
 }
 
 function searchTerms(prompt: string): string[] {

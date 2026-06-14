@@ -4,6 +4,7 @@ import type { HiveProposal } from "../hive/api.js";
 import type { Logger } from "../logger.js";
 
 export type HiveSqlApi = {
+  providerName?: string;
   findAccountNamesByPattern(pattern: string, limit: number): Promise<string[]>;
   searchComments(options: HiveSqlSearchOptions): Promise<HiveSqlSearchResult>;
   getTopPost(options: HiveSqlTopPostOptions): Promise<HiveSqlTopPost | null>;
@@ -146,6 +147,8 @@ export type HiveSqlBadge = {
 export type HiveSqlBadgeStats = {
   recipients: number;
   subscribers: number;
+  listedBy: HiveSqlBadge[];
+  listedByTotal: number;
 };
 
 export type HiveSqlDelegation = {
@@ -179,6 +182,8 @@ export type HiveSqlAccountSummary = {
 };
 
 export class HiveSqlClient implements HiveSqlApi {
+  readonly providerName = "HiveSQL";
+
   private static loggedConnection = false;
   private pool: sql.ConnectionPool | null = null;
 
@@ -847,16 +852,47 @@ export class HiveSqlClient implements HiveSqlApi {
     const pool = await this.connection();
     const response = await pool.request()
       .input("account", sql.VarChar(16), account)
-      .query<{ recipients: number; subscribers: number }>(`
+      .query<{
+        recipients: number;
+        subscribers: number;
+        listedByTotal: number;
+        name: string | null;
+        recoveryAccount: string | null;
+        jsonMetadata: string | null;
+        created: Date | null;
+      }>(`
         SELECT
-          (SELECT COUNT(*) FROM [Followers] WHERE [follower] = @account) AS [recipients],
-          (SELECT COUNT(*) FROM [Followers] WHERE [following] = @account) AS [subscribers]
+          (SELECT COUNT(*) FROM [Followers] WHERE [follower] = @account AND [following] NOT LIKE 'badge-%') AS [recipients],
+          (SELECT COUNT(*) FROM [Followers] WHERE [following] = @account AND [follower] NOT LIKE 'badge-%') AS [subscribers],
+          (SELECT COUNT(*) FROM [Followers] WHERE [following] = @account AND [follower] LIKE 'badge-%') AS [listedByTotal],
+          [accounts].[name],
+          [accounts].[recovery_account] AS [recoveryAccount],
+          [accounts].[json_metadata] AS [jsonMetadata],
+          [accounts].[created] AS [created]
+        FROM (SELECT 1 AS [anchor]) AS [anchor]
+        LEFT JOIN (
+          SELECT TOP (5) [follower]
+          FROM [Followers]
+          WHERE [following] = @account
+            AND [follower] LIKE 'badge-%'
+          ORDER BY [follower]
+        ) AS [listed] ON 1 = 1
+        LEFT JOIN [Accounts] AS [accounts] ON [accounts].[name] = [listed].[follower]
       `);
     const row = response.recordset[0];
 
     return {
       recipients: Number(row?.recipients ?? 0),
       subscribers: Number(row?.subscribers ?? 0),
+      listedByTotal: Number(row?.listedByTotal ?? 0),
+      listedBy: response.recordset
+        .filter((listed): listed is typeof listed & { name: string; recoveryAccount: string } => Boolean(listed.name && listed.recoveryAccount))
+        .map((listed) => ({
+          name: listed.name,
+          recoveryAccount: listed.recoveryAccount,
+          jsonMetadata: listed.jsonMetadata,
+          created: listed.created,
+        })),
     };
   }
 

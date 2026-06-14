@@ -15,9 +15,33 @@ export class HiveAmbientContextProvider implements AmbientContextProvider {
   ) {}
 
   async contextFor(prompt: string): Promise<string | null> {
-    if (!wantsHiveAmbientContext(prompt)) return null;
+    const postRef = extractHivePostSummaryRef(prompt);
+    const accountCandidate = extractHiveAccountLookupCandidate(prompt);
+    if (!wantsHiveAmbientContext(prompt) && !postRef && !accountCandidate) return null;
 
     try {
+      if (postRef) {
+        const post = await this.hive.getPostCreation(postRef.author, postRef.permlink);
+        return [
+          "Ambient Hive post context from a direct Hive RPC get_content lookup. This is not a web fetch, URL scrape, command output, or HiveSQL search.",
+          post
+            ? formatPostContext(post)
+            : `Hive post @${postRef.author}/${postRef.permlink}: no post returned by Hive RPC. If the user asked for a summary, decline to summarize it because it is not actually available on Hive.`,
+          "Use this only for the referenced Hive post. Do not imply that the pasted URL itself was fetched.",
+        ].join("\n");
+      }
+
+      if (accountCandidate) {
+        const account = await this.hive.getAccount(accountCandidate);
+        return [
+          "Ambient Hive account context from a direct Hive RPC account lookup. This is not command output, and it is not a HiveSQL/person/content search.",
+          account
+            ? formatAccountContext(account)
+            : `Hive account @${accountCandidate}: no account returned by Hive RPC.`,
+          "Use this only as a possible Hive handle match. Do not imply that other platforms or Discord globally were checked.",
+        ].join("\n");
+      }
+
       const [globals, ticker, feed, latest, trending] = await Promise.all([
         this.hive.getDynamicGlobalProperties(),
         this.hive.getMarketTicker(),
@@ -48,6 +72,120 @@ export class HiveAmbientContextProvider implements AmbientContextProvider {
 export function wantsHiveAmbientContext(prompt: string): boolean {
   const value = prompt.toLowerCase();
   return /\bhive\b/.test(value) && /\b(today|now|new|happening|going on|latest|current|recent|trend|trending|chain|blockchain|market|price)\b/.test(value);
+}
+
+function extractHivePostSummaryRef(prompt: string): { author: string; permlink: string } | null {
+  if (!/\b(?:summari[sz]e|summary|tldr|tl;dr|explain|what(?:'s| is) this|tell me about)\b/i.test(prompt)) return null;
+  return extractHivePostRef(prompt);
+}
+
+function extractHivePostRef(value: string): { author: string; permlink: string } | null {
+  const rawRef = value.match(/(?:^|[\s`])@([a-z0-9][a-z0-9.-]{1,14}[a-z0-9])\/([a-z0-9][a-z0-9-]{0,255})(?=$|[\s`).,?!>])/i);
+  if (rawRef?.[1] && rawRef[2]) return { author: rawRef[1].toLowerCase(), permlink: rawRef[2].toLowerCase() };
+
+  for (const match of value.matchAll(/https?:\/\/[^\s<>)]+/gi)) {
+    const ref = extractHivePostRefFromUrl(match[0].replace(/[),.?!]+$/g, ""));
+    if (ref) return ref;
+  }
+
+  return null;
+}
+
+function extractHivePostRefFromUrl(value: string): { author: string; permlink: string } | null {
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const authorIndex = segments.findIndex((segment) => /^@[a-z0-9][a-z0-9.-]{1,14}[a-z0-9]$/i.test(segment));
+    const authorSegment = authorIndex >= 0 ? segments[authorIndex] : null;
+    const permlink = authorIndex >= 0 ? segments[authorIndex + 1] : null;
+    if (!authorSegment || !permlink || !/^[a-z0-9][a-z0-9-]{0,255}$/i.test(permlink)) return null;
+    return { author: authorSegment.slice(1).toLowerCase(), permlink: permlink.toLowerCase() };
+  } catch {
+    return null;
+  }
+}
+
+function extractHiveAccountLookupCandidate(prompt: string): string | null {
+  for (const line of prompt.split(/\n+/)) {
+    const candidate = line.match(/\bContext planner Hive RPC account candidate:\s*@?([a-z0-9][a-z0-9.-]{1,14}[a-z0-9])\b/i)?.[1] ??
+      line.match(/\b(?:tell me about|who is|what is|look up|lookup|check|about)\s+@?([a-z0-9][a-z0-9.-]{1,14}[a-z0-9])\b/i)?.[1] ??
+      line.match(/@([a-z0-9][a-z0-9.-]{1,14}[a-z0-9])\b/i)?.[1];
+    const normalized = candidate?.toLowerCase();
+    if (normalized && !ACCOUNT_LOOKUP_STOP_WORDS.has(normalized)) return normalized;
+  }
+
+  return null;
+}
+
+const ACCOUNT_LOOKUP_STOP_WORDS = new Set([
+  "discord",
+  "handle",
+  "hive",
+  "search",
+  "that",
+  "this",
+]);
+
+function formatPostContext(post: HivePost): string {
+  const details = [
+    `Hive post @${post.author}/${post.permlink}: found.`,
+    post.title ? `Title: ${post.title}.` : null,
+    post.created ? `Created: ${post.created}.` : null,
+    typeof post.net_votes === "number" ? `Votes: ${post.net_votes}.` : null,
+    post.pending_payout_value ? `Pending payout: ${post.pending_payout_value}.` : null,
+    post.body ? `Body excerpt:\n${trimPostBody(post.body)}` : "Body excerpt: none returned.",
+  ].filter(Boolean);
+  return details.join("\n");
+}
+
+function trimPostBody(body: string): string {
+  const compact = body
+    .replace(/!\[[^\]]*]\([^)]*\)/g, "")
+    .replace(/\[[^\]]+]\(([^)]+)\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (compact.length <= 1_500) return compact;
+  return `${compact.slice(0, 1_497).trimEnd()}...`;
+}
+
+function formatAccountContext(account: { name: string; created?: string; posting_json_metadata?: string; json_metadata?: string }): string {
+  const metadata = accountMetadata(account);
+  const details = [
+    `Hive account @${account.name}: found.`,
+    account.created ? `Created: ${account.created}.` : null,
+    metadata.name ? `Profile name: ${metadata.name}.` : null,
+    metadata.about ? `Profile about: ${metadata.about}.` : null,
+    metadata.website ? `Profile website: ${metadata.website}.` : null,
+  ].filter(Boolean);
+  return details.join("\n");
+}
+
+function accountMetadata(account: { posting_json_metadata?: string; json_metadata?: string }): Record<string, string> {
+  for (const raw of [account.posting_json_metadata, account.json_metadata]) {
+    const parsed = parseJsonObject(raw);
+    const profile = parseJsonObject(parsed?.profile);
+    if (profile) return stringRecord(profile);
+  }
+
+  return {};
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringRecord(value: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0),
+  );
 }
 
 function formatPosts(label: string, posts: HivePost[]): string {

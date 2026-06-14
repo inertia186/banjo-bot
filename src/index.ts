@@ -18,6 +18,7 @@ import { LlmChat } from "./llm/chat.js";
 import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "./llm/channel-context.js";
 import { LlmConversationLeases } from "./llm/conversation-lease.js";
 import { HiveAmbientContextProvider } from "./llm/hive-context.js";
+import { HiveReferenceContextProvider } from "./llm/hive-reference-context.js";
 import { llmPrompt } from "./llm/prompt.js";
 import { hasInterveningHumanActivity, TypingActivityTracker } from "./llm/turn-taking.js";
 import { logger } from "./logger.js";
@@ -46,6 +47,7 @@ const llmChat = new LlmChat(
   client.commands,
   new CompositeAmbientContextProvider([
     new HiveAmbientContextProvider(config, logger),
+    new HiveReferenceContextProvider(config, logger),
     new ChannelAmbientContextProvider(logger),
   ]),
 );
