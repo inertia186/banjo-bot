@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HafbeRestClient } from "../src/hafbe/api.js";
 import type { AppConfig } from "../src/config.js";
 import type { Logger } from "../src/logger.js";
+import { GiphyHttpClient } from "../src/media/giphy.js";
 
 const logger: Logger = {
   info: () => undefined,
@@ -20,8 +20,13 @@ const config: AppConfig = {
     nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
     requestTimeoutMs: 1_000,
   },
+  hiveReferences: {
+    whitepaperPath: null,
+    sourcePath: null,
+    maxAgeDays: 30,
+  },
   hafbe: {
-    baseUrl: "https://hafbe.test/hafbe-api",
+    baseUrl: null,
   },
   hyperion: {
     baseUrl: "https://hyperion.test",
@@ -61,8 +66,8 @@ const config: AppConfig = {
     baseUrl: "https://splinterlands.test",
   },
   giphy: {
-    apiKey: null,
-    requestTimeoutMs: 1_000,
+    apiKey: "test-key",
+    requestTimeoutMs: 1,
   },
   llm: {
     enabled: false,
@@ -74,44 +79,17 @@ const config: AppConfig = {
   },
 };
 
-test("HAFBE first post lookup uses public REST route and newest-first pagination", async () => {
+test("Giphy lookup returns null when the request times out", async () => {
   const originalFetch = globalThis.fetch;
-  const urls: string[] = [];
-
-  globalThis.fetch = async (input) => {
-    const url = input instanceof URL ? input : new URL(String(input));
-    urls.push(url.toString());
-
-    assert.equal(url.pathname, "/hafbe-api/accounts/alice/comment-permlinks");
-    assert.equal(url.searchParams.get("comment-type"), "post");
-    assert.equal(url.searchParams.get("page-size"), "100");
-
-    const page = url.searchParams.get("page");
-    const permlinks = page === "2"
-      ? [{ permlink: "first-post", block: 1, timestamp: "2016-01-01T00:00:00" }]
-      : Array.from({ length: 100 }, (_, index) => ({
-          permlink: `newer-${index}`,
-          block: 200 - index,
-          timestamp: "2017-01-01T00:00:00",
-        }));
-
-    return new Response(JSON.stringify({
-      total_permlinks: 101,
-      permlinks_result: permlinks,
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
+  globalThis.fetch = async (_input, init) => {
+    assert.ok(init?.signal);
+    return new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
     });
   };
 
   try {
-    const post = await new HafbeRestClient(config, logger).getFirstPost("alice", 0);
-
-    assert.equal(post?.permlink, "first-post");
-    assert.deepEqual(urls, [
-      "https://hafbe.test/hafbe-api/accounts/alice/comment-permlinks?comment-type=post&page=1&page-size=100",
-      "https://hafbe.test/hafbe-api/accounts/alice/comment-permlinks?comment-type=post&page=2&page-size=100",
-    ]);
+    assert.equal(await new GiphyHttpClient(config, logger).searchGif("debugging"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }

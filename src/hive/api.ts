@@ -1,4 +1,5 @@
 import type { AppConfig } from "../config.js";
+import { fetchWithTimeout } from "../http.js";
 import type { Logger } from "../logger.js";
 
 export type HiveAccount = {
@@ -555,7 +556,7 @@ export class HiveRpcClient implements HiveApi {
 
     for (const node of this.config.hive.nodes) {
       try {
-        const response = await fetch(node, {
+        const response = await fetchWithTimeout(node, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -564,7 +565,7 @@ export class HiveRpcClient implements HiveApi {
             method,
             params,
           }),
-        });
+        }, this.config.hive.requestTimeoutMs);
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);

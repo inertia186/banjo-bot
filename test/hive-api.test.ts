@@ -18,6 +18,7 @@ const config: AppConfig = {
   hive: {
     nodes: ["https://hive.test"],
     nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
+    requestTimeoutMs: 1_000,
   },
   hafbe: {
     baseUrl: null,
@@ -50,6 +51,18 @@ const config: AppConfig = {
   },
   market: {
     coinGeckoBaseUrl: "https://coingecko.test",
+    requestTimeoutMs: 1_000,
+  },
+  hiveEngine: {
+    contractsUrl: "https://hive-engine.test/rpc/contracts",
+    scotApiUrl: "https://scot.test",
+  },
+  splinterlands: {
+    baseUrl: "https://splinterlands.test",
+  },
+  giphy: {
+    apiKey: null,
+    requestTimeoutMs: 1_000,
   },
   llm: {
     enabled: false,
@@ -133,6 +146,56 @@ test("Hive first post lookup scans account history and ignores later edits", asy
   }
 });
 
+test("Hive RPC failover advances past a timed out node", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+
+  globalThis.fetch = async (input, init) => {
+    const node = String(input);
+    calls.push(node);
+
+    if (node === "https://stalled.test") {
+      assert.ok(init?.signal);
+      return rejectOnAbort(init.signal);
+    }
+
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.method, "condenser_api.get_dynamic_global_properties");
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: {
+        total_vesting_fund_hive: "1000.000 HIVE",
+        total_vesting_shares: "2000.000000 VESTS",
+        head_block_number: 123,
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const client = new HiveRpcClient({
+      ...config,
+      hive: {
+        ...config.hive,
+        nodes: ["https://stalled.test", "https://healthy.test"],
+        requestTimeoutMs: 1,
+      },
+    }, logger);
+
+    assert.deepEqual(await client.getDynamicGlobalProperties(), {
+      total_vesting_fund_hive: "1000.000 HIVE",
+      total_vesting_shares: "2000.000000 VESTS",
+      head_block_number: 123,
+    });
+    assert.deepEqual(calls, ["https://stalled.test", "https://healthy.test"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Hive post creation uses content created timestamp directly", async () => {
   const originalFetch = globalThis.fetch;
   const methods: string[] = [];
@@ -175,6 +238,17 @@ test("Hive post creation uses content created timestamp directly", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+function rejectOnAbort(signal: AbortSignal): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+}
 
 test("Hive post creation fails fast when content is unavailable", async () => {
   const originalFetch = globalThis.fetch;

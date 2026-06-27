@@ -1,4 +1,5 @@
 import type { AppConfig } from "../config.js";
+import { fetchWithTimeout } from "../http.js";
 import type { Logger } from "../logger.js";
 
 export type GiphyApi = {
@@ -33,7 +34,7 @@ export class GiphyHttpClient implements GiphyApi {
     url.searchParams.set("rating", "pg-13");
 
     try {
-      const response = await fetch(url);
+      const response = await fetchWithTimeout(url, {}, this.config.giphy.requestTimeoutMs);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const payload = (await response.json()) as GiphySearchResponse;

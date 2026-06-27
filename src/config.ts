@@ -8,6 +8,7 @@ export type AppConfig = {
   hive: {
     nodes: string[];
     nodesSourceUrl: string;
+    requestTimeoutMs: number;
   };
   hiveReferences: {
     whitepaperPath: string | null;
@@ -45,6 +46,7 @@ export type AppConfig = {
   };
   market: {
     coinGeckoBaseUrl: string;
+    requestTimeoutMs: number;
   };
   hiveEngine: {
     contractsUrl: string;
@@ -55,6 +57,7 @@ export type AppConfig = {
   };
   giphy: {
     apiKey: string | null;
+    requestTimeoutMs: number;
   };
   llm: {
     enabled: boolean;
@@ -90,6 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     hive: {
       nodes: hiveNodes,
       nodesSourceUrl: env.HIVE_NODES_SOURCE_URL ?? "https://developers.hive.io/quickstart/hive_full_nodes.html",
+      requestTimeoutMs: readPositiveInteger(env.HIVE_RPC_TIMEOUT_MS, 10_000),
     },
     hiveReferences: {
       whitepaperPath: env.HIVE_WHITEPAPER_TEXT_PATH ?? null,
@@ -130,6 +134,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     market: {
       coinGeckoBaseUrl: env.COINGECKO_BASE_URL?.replace(/\/+$/, "") || "https://api.coingecko.com/api/v3",
+      requestTimeoutMs: readPositiveInteger(env.MARKET_REQUEST_TIMEOUT_MS, 8_000),
     },
     hiveEngine: {
       contractsUrl: env.HIVE_ENGINE_CONTRACTS_URL?.replace(/\/+$/, "") || "https://api.hive-engine.com/rpc/contracts",
@@ -140,6 +145,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     giphy: {
       apiKey: env.GIPHY_API_KEY ?? null,
+      requestTimeoutMs: readPositiveInteger(env.GIPHY_REQUEST_TIMEOUT_MS, 5_000),
     },
     llm: {
       enabled: env.LLM_ENABLED === "true",

@@ -18,6 +18,7 @@ const config: AppConfig = {
   hive: {
     nodes: ["https://example.test"],
     nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
+    requestTimeoutMs: 1_000,
   },
   hafbe: {
     baseUrl: null,
@@ -50,6 +51,7 @@ const config: AppConfig = {
   },
   market: {
     coinGeckoBaseUrl: "https://coingecko.test",
+    requestTimeoutMs: 1_000,
   },
   hiveEngine: {
     contractsUrl: "https://hive-engine.test/rpc/contracts",
@@ -60,6 +62,7 @@ const config: AppConfig = {
   },
   giphy: {
     apiKey: null,
+    requestTimeoutMs: 1_000,
   },
   llm: {
     enabled: false,

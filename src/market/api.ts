@@ -1,4 +1,5 @@
 import type { AppConfig } from "../config.js";
+import { fetchWithTimeout } from "../http.js";
 import type { Logger } from "../logger.js";
 
 export type MarketApi = {
@@ -64,7 +65,7 @@ export class CoinGeckoMarketClient implements MarketApi {
     url.searchParams.set("include_24hr_change", "true");
 
     try {
-      const response = await fetch(url);
+      const response = await fetchWithTimeout(url, {}, this.config.market.requestTimeoutMs);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const payload = (await response.json()) as CoinGeckoSimplePrice;
@@ -99,7 +100,7 @@ export class CoinGeckoMarketClient implements MarketApi {
     url.searchParams.set("vs_currencies", "usd");
 
     try {
-      const response = await fetch(url);
+      const response = await fetchWithTimeout(url, {}, this.config.market.requestTimeoutMs);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const payload = (await response.json()) as CoinGeckoSimplePrice;
@@ -120,7 +121,7 @@ export class CoinGeckoMarketClient implements MarketApi {
     url.searchParams.set("limit", String(Math.max(1, Math.min(10, limit))));
 
     try {
-      const response = await fetch(url);
+      const response = await fetchWithTimeout(url, {}, this.config.market.requestTimeoutMs);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const payload = (await response.json()) as AlternativeFearGreedResponse;
