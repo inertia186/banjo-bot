@@ -45,8 +45,8 @@ export class XkcdHttpClient implements XkcdApi {
       return {
         num: payload.num,
         title: payload.title,
-        safeTitle: payload.safe_title || payload.title,
-        alt: payload.alt || "",
+        safeTitle: typeof payload.safe_title === "string" ? payload.safe_title : payload.title,
+        alt: typeof payload.alt === "string" ? payload.alt : "",
         imageUrl: payload.img,
       };
     } catch (error) {
