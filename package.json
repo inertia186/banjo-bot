@@ -1,6 +1,6 @@
 {
   "name": "banjo-bot",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "A modern reimplementation of the Banjo Discord bot.",
   "license": "CC0-1.0",
   "type": "module",
