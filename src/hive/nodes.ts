@@ -21,15 +21,22 @@ export class HiveDeveloperNodeDirectory implements HiveNodeDirectory {
       const response = await fetch(this.config.hive.nodesSourceUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-      return parseHiveDeveloperNodes(await response.text());
+      const nodes = parseHiveDeveloperNodes(await response.text());
+      if (nodes.length === 0) throw new Error("No public nodes found in directory response.");
+
+      return nodes;
     } catch (error) {
       this.logger.warn("Hive node directory lookup failed.", {
         error: error instanceof Error ? error.message : String(error),
       });
 
-      return this.config.hive.nodes.map((url) => ({ url }));
+      return fallbackNodes(this.config);
     }
   }
+}
+
+function fallbackNodes(config: AppConfig): HiveNode[] {
+  return config.hive.nodes.map((url) => ({ url }));
 }
 
 export function parseHiveDeveloperNodes(html: string): HiveNode[] {
