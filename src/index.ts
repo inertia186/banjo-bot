@@ -1,18 +1,14 @@
 import {
-  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
   MessageFlags,
   Partials,
-  type GuildTextBasedChannel,
-  type Message,
 } from "discord.js";
-import { parseCommand } from "./command-parser.js";
 import { loadConfig } from "./config.js";
 import { handleHelpInteraction } from "./commands/core.js";
 import { registerCommands } from "./commands/index.js";
-import { handleNftShowroomInteraction, handleProposalInteraction, handleSearchInteraction, UserFacingCommandError } from "./commands/hive.js";
+import { handleNftShowroomInteraction, handleProposalInteraction, handleSearchInteraction } from "./commands/hive.js";
 import { handleSplinterlandsInteraction } from "./commands/splinterlands.js";
 import { HyperionAgentClient } from "./hyperion/api.js";
 import { LlmChat } from "./llm/chat.js";
@@ -20,11 +16,10 @@ import { ChannelAmbientContextProvider, CompositeAmbientContextProvider } from "
 import { LlmConversationLeases } from "./llm/conversation-lease.js";
 import { HiveAmbientContextProvider } from "./llm/hive-context.js";
 import { HiveReferenceContextProvider } from "./llm/hive-reference-context.js";
-import { llmPrompt } from "./llm/prompt.js";
-import { hasInterveningHumanActivity, TypingActivityTracker } from "./llm/turn-taking.js";
+import { TypingActivityTracker } from "./llm/turn-taking.js";
 import { logger } from "./logger.js";
+import { handleMessageCreate } from "./message-handler.js";
 import { PassiveSnarks } from "./passive-snarks.js";
-import { startDelayedTyping } from "./typing.js";
 
 const config = loadConfig();
 
@@ -66,60 +61,16 @@ client.once(Events.ClientReady, () => {
   });
 });
 
-client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
-  if (!isAllowedChannel(message)) return;
-
-  const passiveResponse = passiveSnarks.replyFor(message.content);
-  if (passiveResponse) {
-    if (passiveResponse.kind === "reply") {
-      await message.reply(passiveResponse.content);
-    } else if (passiveResponse.kind === "spongebob") {
-      await replyWithSpongebob(message);
-    } else if (llmChat.enabled) {
-      const response = await llmChat.replyTo(message, passiveResponse.prompt);
-      if (response && !await hasInterveningHumanActivity(message, typingActivity)) {
-        await message.reply(response);
-      }
-    }
-    return;
-  }
-
-  const parsed = parseCommand(message.content, config.commandPrefix);
-  if (!parsed) {
-    await maybeReplyWithLlm(message);
-    return;
-  }
-
-  const command = client.commands.get(parsed.name);
-  if (!command) return;
-
-  const stopTyping = startDelayedTyping(message);
-  try {
-    const response = await command.execute({ message, config, logger, commandName: parsed.name }, parsed.args);
-    if (response) {
-      if (typeof response === "string") {
-        await message.reply(response);
-      } else {
-        const { afterSend, ...replyOptions } = response;
-        const reply = await message.reply(replyOptions);
-        await afterSend?.(reply);
-      }
-    }
-  } catch (error) {
-    if (error instanceof UserFacingCommandError) {
-      await message.reply(error.message);
-      return;
-    }
-
-    logger.error("Command failed.", {
-      command: parsed.name,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await message.reply("Sorry, that command failed while Banjo is still being rebuilt.");
-  } finally {
-    stopTyping();
-  }
+client.on("messageCreate", (message) => {
+  void handleMessageCreate(message, {
+    config,
+    logger,
+    commands: client.commands,
+    llmChat,
+    passiveSnarks,
+    conversationLeases,
+    typingActivity,
+  });
 });
 
 client.on(Events.TypingStart, (typing) => {
@@ -151,44 +102,3 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 await client.login(config.discordToken);
-
-function isAllowedChannel(message: Message): boolean {
-  if (!config.channels) return true;
-  if (message.channel.type === ChannelType.DM) return true;
-
-  const channel = message.channel as GuildTextBasedChannel;
-  return config.channels.has(channel.id) || config.channels.has(channel.name);
-}
-
-async function maybeReplyWithLlm(message: Message) {
-  if (!llmChat.enabled) return;
-
-  const prompt = llmPrompt(message, config.commandPrefix, conversationLeases);
-  if (!prompt) return;
-
-  if ("sendTyping" in message.channel) {
-    await message.channel.sendTyping();
-  }
-
-  const response = await llmChat.replyTo(message, prompt);
-  if (response && !await hasInterveningHumanActivity(message, typingActivity)) {
-    await message.reply(response);
-    conversationLeases.noteBotReply(message);
-  } else {
-    conversationLeases.closeForMessage(message);
-  }
-}
-
-async function replyWithSpongebob(message: Message) {
-  const reply = await message.reply("**Sponge**");
-  await sleep(250);
-  await reply.edit("**Spongebob**");
-  await sleep(250);
-  await reply.edit("**Spongebob Square**");
-  await sleep(250);
-  await reply.edit("**Spongebob Squarepants!**");
-}
-
-async function sleep(milliseconds: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
