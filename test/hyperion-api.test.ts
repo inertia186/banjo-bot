@@ -73,7 +73,7 @@ const config: AppConfig = {
 };
 
 test("HyperionAgentClient sends bearer auth for digest requests", async () => {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const client = new HyperionAgentClient(config, async (url, init) => {
     calls.push({ url: String(url), init });
     return jsonResponse({ posts: [] });
@@ -100,7 +100,7 @@ test("HyperionAgentClient reads unauthenticated session state", async () => {
 });
 
 test("HyperionAgentClient starts and redeems auth challenges without bearer auth", async () => {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const client = new HyperionAgentClient(config, async (url, init) => {
     calls.push({ url: String(url), init });
     if (String(url).endsWith("/auth_challenges")) {

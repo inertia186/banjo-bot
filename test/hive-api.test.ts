@@ -20,6 +20,11 @@ const config: AppConfig = {
     nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
     requestTimeoutMs: 1_000,
   },
+  hiveReferences: {
+    whitepaperPath: null,
+    sourcePath: null,
+    maxAgeDays: 30,
+  },
   hafbe: {
     baseUrl: null,
   },

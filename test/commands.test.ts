@@ -204,11 +204,11 @@ test("legacy static links keep their migrated URLs", async () => {
   const commands = registry();
 
   assert.equal(
-    (await commands.get("bandwagon")?.execute(context(commands), []) as { files: string[] }).files[0].endsWith("assets/images/bandwagon.jpg"),
+    (await commands.get("bandwagon")?.execute(context(commands), []) as { files: string[] }).files[0]!.endsWith("assets/images/bandwagon.jpg"),
     true,
   );
   assert.equal(
-    (await commands.get("headphones")?.execute(context(commands), []) as { files: string[] }).files[0].endsWith("assets/images/headphones.jpg"),
+    (await commands.get("headphones")?.execute(context(commands), []) as { files: string[] }).files[0]!.endsWith("assets/images/headphones.jpg"),
     true,
   );
   assert.equal(
@@ -469,7 +469,7 @@ test("splinterlands reports player account details", async () => {
   assert.ok(embed.fields?.some((field) => field.name === "Balances" && /DEC: 1,235/.test(field.value) && /VOUCHER: 17\.5/.test(field.value)));
 
   assert.equal(typeof response, "object");
-  const components = (response as { components: Array<{ toJSON(): { components: Array<{ custom_id?: string; url?: string }> } }> }).components;
+  const components = (response as unknown as { components: Array<{ toJSON(): { components: Array<{ custom_id?: string; url?: string }> } }> }).components;
   assert.equal(components.length, 2);
   assert.equal(components[0]?.toJSON().components[0]?.custom_id, "spl:section:yabapmatt");
   const actions = components[1]?.toJSON().components ?? [];
@@ -866,8 +866,8 @@ test("image snarks upload vendored legacy assets", async () => {
   assert.deepEqual(Object.keys(ricky as Record<string, unknown>), ["files"]);
   assert.deepEqual(Object.keys(kappa as Record<string, unknown>), ["files"]);
 
-  const rickyFile = (ricky as { files: string[] }).files[0];
-  const kappaFile = (kappa as { files: string[] }).files[0];
+  const rickyFile = (ricky as { files: string[] }).files[0]!;
+  const kappaFile = (kappa as { files: string[] }).files[0]!;
 
   assert.match(rickyFile, /assets\/images\/ricky\.gif$/);
   assert.match(kappaFile, /assets\/images\/kappa\.png$/);
@@ -1862,7 +1862,7 @@ test("hive account commands use the injected Hive API", async () => {
   assert.equal(proposalEmbed.footer?.text, "Hive DHF Proposal | Hive RPC");
   assert.deepEqual(proposalEmbed.fields, undefined);
   const proposalListResponse = await commands.get("proposal")?.execute(context(commands, "proposal", { hive }), ["tools"]);
-  const proposalComponents = (proposalListResponse as {
+  const proposalComponents = (proposalListResponse as unknown as {
     components: Array<{ toJSON(): { components: Array<{ type?: number; style?: number; custom_id?: string; label?: string; disabled?: boolean }> } }>;
   }).components[0]?.toJSON().components;
   assert.deepEqual(proposalComponents?.map((component) => ({
@@ -2065,6 +2065,7 @@ test("hive account commands use the injected Hive API", async () => {
     title?: string;
     url?: string;
     description?: string;
+    thumbnail?: { url: string };
     image?: { url: string };
     footer?: { text: string; icon_url?: string };
     fields?: Array<{ name: string; value: string; inline?: boolean }>;
@@ -2090,7 +2091,7 @@ test("hive account commands use the injected Hive API", async () => {
     { name: "Timeframe", value: "between 2026-05-01 00:00 UTC and 2026-05-16 23:59 UTC", inline: true },
   ]);
   const searchResponse = await commands.get("search")?.execute(context(commands, "search", { hive, hiveSql }), ["banjo", "tag:hive", "!tag:test", "after:2026-05-01", "before:2026-05-16"]);
-  const searchComponents = (searchResponse as {
+  const searchComponents = (searchResponse as unknown as {
     components: Array<{ toJSON(): { components: Array<{ type?: number; style?: number; custom_id?: string; label?: string; disabled?: boolean }> } }>;
   }).components[0]?.toJSON().components;
   assert.deepEqual(searchComponents?.map((component) => ({
@@ -2105,7 +2106,7 @@ test("hive account commands use the injected Hive API", async () => {
     { customId: "search:<cache>:1", label: "Next", disabled: false },
   ]);
   const singleSearchResponse = await commands.get("search")?.execute(context(commands, "search", { hive, hiveSql }), ["single"]);
-  const singleSearchComponents = (singleSearchResponse as {
+  const singleSearchComponents = (singleSearchResponse as unknown as {
     components: Array<{ toJSON(): { components: Array<{ custom_id?: string; label?: string; disabled?: boolean }> } }>;
   }).components[0]?.toJSON().components;
   assert.deepEqual(singleSearchComponents?.map((component) => ({
@@ -2445,8 +2446,8 @@ test("hive account commands use the injected Hive API", async () => {
   assert.equal(
     await commands.get("calcreward")?.execute(
       context(commands, "calcreward", { hive }, {
-        fetchReference: async () => ({ content: "Worth checking: https://hive.blog/@alice/first-post." }) as Message,
-      }),
+        fetchReference: async () => ({ content: "Worth checking: https://hive.blog/@alice/first-post." }) as unknown as Awaited<ReturnType<Message["fetchReference"]>>,
+      } as unknown as Partial<Message>),
       [],
     ),
     "Total Pending Payout: $12.345 (19.595% the size of reward pool).",
@@ -2490,7 +2491,7 @@ test("hive account commands use the injected Hive API", async () => {
             ]),
           },
         } as unknown as Message["channel"],
-      }),
+      } as unknown as Partial<Message>),
       ["^"],
     ),
   );
@@ -2511,7 +2512,7 @@ test("hive account commands use the injected Hive API", async () => {
             ]),
           },
         } as unknown as Message["channel"],
-      }),
+      } as unknown as Partial<Message>),
       ["^"],
     ),
   );
@@ -2788,7 +2789,7 @@ test("hive account commands use the injected Hive API", async () => {
   ]);
   assert.match(nftsrEmbed.fields?.[3]?.value ?? "", /^.+ ago \(2020-06-22 00:00 UTC\)$/);
   const nftsrResponse = await commands.get("nftsr")?.execute(context(commands, "nftsr", { hiveEngine }), ["inertia", "1"]);
-  const nftsrComponents = (nftsrResponse as {
+  const nftsrComponents = (nftsrResponse as unknown as {
     components: Array<{ toJSON(): { components: Array<{ type?: number; style?: number; custom_id?: string; label?: string; disabled?: boolean }> } }>;
   }).components[0]?.toJSON().components;
   assert.deepEqual(nftsrComponents?.map((component) => ({

@@ -75,6 +75,9 @@ const config: AppConfig = {
     contractsUrl: "https://hive-engine.test/rpc/contracts",
     scotApiUrl: "https://scot.test",
   },
+  splinterlands: {
+    baseUrl: "https://splinterlands.test",
+  },
   giphy: {
     apiKey: null,
     requestTimeoutMs: 1_000,
@@ -284,10 +287,11 @@ test("buildLlmInput avoids speaker-label prompts that encourage third-person rep
     userName: "inertia",
   });
 
-  assert.equal(input[0]?.role, "user");
-  assert.match(String(input[0]?.content), /User display name: inertia/);
-  assert.match(String(input[0]?.content), /User message: What's new on Hive\?/);
-  assert.doesNotMatch(String(input[0]?.content), /inertia: What's new/);
+  const userInput = input[0] as { role?: string; content?: unknown } | undefined;
+  assert.equal(userInput?.role, "user");
+  assert.match(String(userInput?.content), /User display name: inertia/);
+  assert.match(String(userInput?.content), /User message: What's new on Hive\?/);
+  assert.doesNotMatch(String(userInput?.content), /inertia: What's new/);
 });
 
 test("buildLlmInput includes ambient Hive context as developer context", () => {
@@ -299,9 +303,11 @@ test("buildLlmInput includes ambient Hive context as developer context", () => {
     ambientContext: "Latest posts:\n1. Real post (@alice/real-post)",
   });
 
-  assert.equal(input[0]?.role, "developer");
-  assert.match(String(input[0]?.content), /Real post/);
-  assert.equal(input[1]?.role, "user");
+  const developerInput = input[0] as { role?: string; content?: unknown } | undefined;
+  const userInput = input[1] as { role?: string } | undefined;
+  assert.equal(developerInput?.role, "developer");
+  assert.match(String(developerInput?.content), /Real post/);
+  assert.equal(userInput?.role, "user");
 });
 
 test("buildInstructions incorporates the Ruby gpt-prompt persona", () => {
@@ -646,7 +652,7 @@ test("HiveAmbientContextProvider prefers Hyperion digest for current Hive contex
     },
   } as unknown as HiveApi;
   const hyperion = {
-    getDigest: async (options) => {
+    getDigest: async (options: Parameters<HyperionApi["getDigest"]>[0]) => {
       assert.deepEqual(options, { limit: 3 });
       return {
         raw: {

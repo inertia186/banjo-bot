@@ -104,7 +104,7 @@ test("HafSQL adapter normalizes account wildcard and delegation rows", async () 
       }
       throw new Error(`Unexpected query: ${text}`);
     },
-  };
+  } as unknown as ConstructorParameters<typeof HafSqlClient>[2];
   const client = new HafSqlClient(config, logger, pool);
 
   assert.deepEqual(await client.findAccountNamesByPattern("team_*", 3), ["team.alpha", "team.beta"]);
@@ -133,7 +133,7 @@ test("HafSQL adapter summarizes reward claims and accounts", async () => {
       }
       throw new Error(`Unexpected query: ${text}`);
     },
-  };
+  } as unknown as ConstructorParameters<typeof HafSqlClient>[2];
   const client = new HafSqlClient(config, logger, pool);
 
   assert.deepEqual(await client.getClaimSummary("all"), {
