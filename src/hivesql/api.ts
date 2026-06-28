@@ -306,7 +306,7 @@ export class HiveSqlClient implements HiveSqlApi {
     const keywordFilters = options.keywords.map((keyword, index) => {
       const input = `keyword${index}`;
       request.input(input, sql.NVarChar(256), `%${keyword.toLowerCase()}%`);
-      return `LOWER(COALESCE([reply].[body], '')) LIKE @${input}`;
+      return topPostKeywordFilter(options.kind === "reply" ? "reply" : "post", input);
     });
     const keywordWhere = keywordFilters.length > 0 ? `AND ${keywordFilters.join(" AND ")}` : "";
 
@@ -349,6 +349,7 @@ export class HiveSqlClient implements HiveSqlApi {
       WHERE [post].[created] >= @since
         AND [post].[depth] = 0
         ${promotedWhere}
+        ${options.kind === "reply" ? "" : keywordWhere}
         ${replyExists}
       ORDER BY ${order}
     `);
@@ -1042,6 +1043,16 @@ export class HiveSqlClient implements HiveSqlApi {
 
     return this.pool;
   }
+}
+
+export function topPostKeywordFilter(alias: "post" | "reply", parameterName: string): string {
+  return alias === "reply"
+    ? `LOWER(COALESCE([reply].[body], '')) LIKE @${parameterName}`
+    : `(
+          LOWER(COALESCE([post].[title], '')) LIKE @${parameterName}
+          OR LOWER(COALESCE([post].[body], '')) LIKE @${parameterName}
+          OR LOWER(COALESCE([post].[json_metadata], '')) LIKE @${parameterName}
+        )`;
 }
 
 function addClaimTimeframeInputs(request: sql.Request, timeframe: HiveSqlClaimTimeframe): string {
