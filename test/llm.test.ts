@@ -983,10 +983,63 @@ test("LlmChat uses Responses API, shapes long prompts, and trims history", async
   assert.equal(requests[0]?.max_output_tokens, 64);
   assert.equal(requests[0]?.instructions, buildInstructions(buildCommandCatalog(commands, "$")));
   assert.match(requests[0]?.instructions ?? "", /\$rep <account>/);
-  assert.equal(requests[3]?.input.length, 5);
+  assert.equal(requests[3]?.input.length, 7);
   assert.match(JSON.stringify(requests[3]?.input), /longer Discord message/);
-  assert.doesNotMatch(JSON.stringify(requests[3]?.input), /Alice: first/);
-  assert.doesNotMatch(JSON.stringify(requests[3]?.input), /Alice: third/);
+  assert.match(JSON.stringify(requests[3]?.input), /first/);
+  assert.match(JSON.stringify(requests[3]?.input), /third/);
+});
+
+test("LlmChat keeps a flat rolling history of 12 messages per conversation", async () => {
+  const requests: ResponseCreateParamsNonStreaming[] = [];
+  const client = {
+    responses: {
+      create: async (body: ResponseCreateParamsNonStreaming) => {
+        requests.push(body);
+        return { output_text: `reply ${requests.length}` };
+      },
+    },
+  };
+  const chat = new LlmChat(config, logger, client);
+
+  for (let index = 1; index <= 8; index += 1) {
+    await chat.replyTo(dmMessage(`turn ${index}`), `turn ${index}`);
+  }
+
+  assert.equal(requests[7]?.input.length, 13);
+  assert.doesNotMatch(JSON.stringify(requests[7]?.input), /turn 1/);
+  assert.doesNotMatch(JSON.stringify(requests[7]?.input), /reply 1/);
+  assert.match(JSON.stringify(requests[7]?.input), /turn 2/);
+  assert.match(JSON.stringify(requests[7]?.input), /reply 7/);
+});
+
+test("LlmChat keeps a flat rolling history of 12 conversations", async () => {
+  const requests: ResponseCreateParamsNonStreaming[] = [];
+  const client = {
+    responses: {
+      create: async (body: ResponseCreateParamsNonStreaming) => {
+        requests.push(body);
+        return { output_text: `reply ${requests.length}` };
+      },
+    },
+  };
+  const chat = new LlmChat(config, logger, client);
+
+  for (let index = 1; index <= 12; index += 1) {
+    await chat.replyTo(dmMessage(`initial conversation ${index}`, `user-${index}`), `initial conversation ${index}`);
+  }
+
+  await chat.replyTo(dmMessage("touch conversation 1", "user-1"), "touch conversation 1");
+  await chat.replyTo(dmMessage("conversation 13", "user-13"), "conversation 13");
+  await chat.replyTo(dmMessage("reopen second user", "user-2"), "reopen second user");
+  await chat.replyTo(dmMessage("reopen conversation 1", "user-1"), "reopen conversation 1");
+
+  assert.equal(requests[14]?.input.length, 1);
+  assert.doesNotMatch(JSON.stringify(requests[14]?.input), /initial conversation 2/);
+  assert.doesNotMatch(JSON.stringify(requests[14]?.input), /reply 2/);
+
+  assert.equal(requests[15]?.input.length, 5);
+  assert.match(JSON.stringify(requests[15]?.input), /initial conversation 1/);
+  assert.match(JSON.stringify(requests[15]?.input), /touch conversation 1/);
 });
 
 test("LlmChat logs provider failures and returns the friendly failure message", async () => {

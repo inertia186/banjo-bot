@@ -10,6 +10,8 @@ const LONG_PROMPT_LIMIT = 140;
 const LONG_PROMPT_EXCERPT_LENGTH = 140;
 const DISCORD_REPLY_LIMIT = 1_900;
 const CONTEXT_PLAN_TOKEN_LIMIT = 120;
+const MAX_HISTORY_CONVERSATIONS = 12;
+const MAX_HISTORY_MESSAGES_PER_CONVERSATION = 12;
 const MAKE_RETORT = "Make it yourself.";
 const THANKS_REPLY = "My pleasure.";
 const AGENTIC_TASK_PATTERN = /^(?:(?:please|pls)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:make|create|build|write|draft|send|post|reply|run|execute|schedule|remind|monitor|watch|open|click|update|edit|fix|deploy|commit|push|merge|delete|remove|moderate|vote|upvote|transfer|pay)\b/i;
@@ -62,6 +64,10 @@ export class LlmChat {
 
     const historyKey = buildConversationKey(message);
     const history = this.histories.get(historyKey) ?? [];
+    if (this.histories.has(historyKey)) {
+      this.histories.delete(historyKey);
+      this.histories.set(historyKey, history);
+    }
     const userName = message.member?.displayName ?? message.author.displayName ?? message.author.username;
     const shapedPrompt = shapePrompt(prompt);
     const userTurn = shapedPrompt;
@@ -92,9 +98,18 @@ export class LlmChat {
   }
 
   private remember(historyKey: string, turn: ConversationTurn) {
-    const maxTurns = this.config.llm.maxHistory * 2;
-    const history = [...(this.histories.get(historyKey) ?? []), turn].slice(-maxTurns);
+    const history = [...(this.histories.get(historyKey) ?? []), turn].slice(-MAX_HISTORY_MESSAGES_PER_CONVERSATION);
+    this.histories.delete(historyKey);
     this.histories.set(historyKey, history);
+    this.evictOldConversations();
+  }
+
+  private evictOldConversations() {
+    while (this.histories.size > MAX_HISTORY_CONVERSATIONS) {
+      const oldestKey = this.histories.keys().next().value;
+      if (oldestKey === undefined) return;
+      this.histories.delete(oldestKey);
+    }
   }
 
   private async buildAmbientContextPrompt(history: ConversationTurn[], prompt: string, message: Message): Promise<string> {
