@@ -77,9 +77,27 @@ function isScotConfigEntry(value: unknown): value is ScotConfigEntry {
 }
 
 function isScotDiscussion(value: unknown): value is ScotDiscussion {
-  return !!value && typeof value === "object";
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return hasOptionalString(record, "author")
+    && hasOptionalNumber(record, "pending_token")
+    && hasOptionalNumber(record, "precision");
 }
 
 function isScotAccountHistoryEntry(value: unknown): value is ScotAccountHistoryEntry {
-  return !!value && typeof value === "object";
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return hasOptionalString(record, "token")
+    && hasOptionalString(record, "type")
+    && hasOptionalString(record, "timestamp")
+    && hasOptionalNumber(record, "int_amount")
+    && hasOptionalNumber(record, "precision");
+}
+
+function hasOptionalString(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === undefined || typeof record[key] === "string";
+}
+
+function hasOptionalNumber(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === undefined || typeof record[key] === "number";
 }

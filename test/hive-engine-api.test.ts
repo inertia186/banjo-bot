@@ -171,6 +171,21 @@ test("ScotHttpClient builds config and discussion requests", async () => {
   ]);
 });
 
+test("ScotHttpClient filters malformed discussion entries", async () => {
+  await withFetch(async () => jsonResponse([
+    { author: "alice", pending_token: 12500, precision: 3 },
+    { author: "bob", pending_token: "12500", precision: 3 },
+    { author: 123, pending_token: 12500, precision: 3 },
+    { author: "carol", pending_token: 2500, precision: "3" },
+    null,
+    [],
+  ]), async () => {
+    assert.deepEqual(await new ScotHttpClient(config, logger).getTrendingDiscussions("LEO", 10), [
+      { author: "alice", pending_token: 12500, precision: 3 },
+    ]);
+  });
+});
+
 test("ScotHttpClient builds account history requests and throws HTTP errors", async () => {
   await withFetch(async (input) => {
     const url = input instanceof URL ? input : new URL(String(input));
@@ -188,6 +203,22 @@ test("ScotHttpClient builds account history requests and throws HTTP errors", as
 
   await withFetch(async () => new Response("nope", { status: 502 }), async () => {
     await assert.rejects(() => new ScotHttpClient(config, logger).getConfig(), /SCOT API HTTP 502/);
+  });
+});
+
+test("ScotHttpClient filters malformed account history entries", async () => {
+  await withFetch(async () => jsonResponse([
+    { token: "LEO", type: "author_reward", timestamp: "2026-06-01T00:00:00", int_amount: 1000, precision: 3 },
+    { token: "LEO", type: "author_reward", timestamp: "2026-06-01T00:00:00", int_amount: "1000", precision: 3 },
+    { token: "LEO", type: "author_reward", timestamp: "2026-06-01T00:00:00", int_amount: 1000, precision: "3" },
+    { token: 123, type: "author_reward", timestamp: "2026-06-01T00:00:00", int_amount: 1000, precision: 3 },
+    { token: "LEO", type: false, timestamp: "2026-06-01T00:00:00", int_amount: 1000, precision: 3 },
+    { token: "LEO", type: "author_reward", timestamp: 123, int_amount: 1000, precision: 3 },
+    [],
+  ]), async () => {
+    assert.deepEqual(await new ScotHttpClient(config, logger).getAccountHistory("alice", "LEO", 10), [
+      { token: "LEO", type: "author_reward", timestamp: "2026-06-01T00:00:00", int_amount: 1000, precision: 3 },
+    ]);
   });
 });
 
