@@ -161,13 +161,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 function readPositiveInteger(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
 
-  const parsed = Number.parseInt(value, 10);
+  const parsed = parseStrictInteger(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function readNonNegativeInteger(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
 
-  const parsed = Number.parseInt(value, 10);
+  const parsed = parseStrictInteger(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseStrictInteger(value: string): number {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return Number.NaN;
+
+  return Number(trimmed);
 }

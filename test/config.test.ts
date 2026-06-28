@@ -25,3 +25,18 @@ test("loadConfig defaults Hyperion to public endpoint without credentials", () =
   assert.equal(config.hyperion.digestLimit, 10);
   assert.deepEqual([...config.hyperion.ownerIds], []);
 });
+
+test("loadConfig rejects malformed numeric environment values", () => {
+  const config = loadConfig({
+    DISCORD_TOKEN: "discord-token",
+    HIVE_RPC_TIMEOUT_MS: "1.5",
+    HIVE_REFERENCE_MAX_AGE_DAYS: "30days",
+    HAFSQL_MAX_POOL_SIZE: "3abc",
+    LLM_MAX_OUTPUT_TOKENS: " 256 ",
+  });
+
+  assert.equal(config.hive.requestTimeoutMs, 10_000);
+  assert.equal(config.hiveReferences.maxAgeDays, 30);
+  assert.equal(config.hafSql.maxPoolSize, 3);
+  assert.equal(config.llm.maxOutputTokens, 256);
+});
