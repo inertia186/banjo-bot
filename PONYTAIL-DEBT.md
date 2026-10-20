@@ -9,8 +9,9 @@ Node 22.22.0: source typecheck passed in 1.16 s; test typecheck passed in 1.11 s
 all 142 tests passed in 0.89 s, with no failures or skips. The compiler emitted
 no diagnostics. Green means both typechecks pass and every retained behavior
 test passes; deleting HAFBE intentionally removes its four obsolete tests.
-The initial baseline reused the existing installed dependencies; final checks
-will also verify the committed lockfile in this isolated checkout.
+The initial baseline reused the existing installed dependencies. Final checks
+used a clean `npm ci --no-audit --no-fund` from the committed lockfile in the
+isolated checkout; neither package file changed.
 
 The source has 37 TypeScript files / 11,939 lines and 19 test files / 6,283 lines.
 There are six runtime and four development dependencies. Generated lockfile
@@ -58,6 +59,16 @@ application bundle exists to simplify; imports and tests check the module list.
 No deterministic PR review script exists. Proposed future diff-only checks are
 new parked-copy filenames and newly copied complete test-config literals; this
 cleanup does not introduce a CI framework solely to enforce them.
+
+## Final validation and totals
+
+After the clean install, `npm run check` passed on Node 22.22.0 in 3.91 s:
+both typechecks passed and all 139 tests passed, with no failures or skips.
+Four HAFBE-only tests were removed and one test for independent fixture defaults
+was added. The changes remove 897 TypeScript lines net, including tests, with
+no dependency additions or removals. All three authorized rows are complete;
+the checks below remain decisions outside this slice. The HTML audit snapshot
+is an untracked review artifact.
 
 ## Checked and left alone
 
