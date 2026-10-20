@@ -2,6 +2,7 @@
 
 Audit base: `origin/main` at `4ceb797af13080e756d26b6f8ba255d838f3e861`, fetched on 2026-10-20.
 Branch: `ponytail/audit-cleanup`. Anthony authorized should-fix audit items 1–3 and a pull request.
+He subsequently authorized the initial CI framework in the same PR.
 
 ## Baseline
 
@@ -56,9 +57,11 @@ parameters/properties. There are no shortcut, TODO, or debug-statement markers
 in source, tests, or scripts. Binary assets and the existing UI helper copies
 remain outside the approved slice. No application HTML/CSS or generated
 application bundle exists to simplify; imports and tests check the module list.
-No deterministic PR review script exists. Proposed future diff-only checks are
-new parked-copy filenames and newly copied complete test-config literals; this
-cleanup does not introduce a CI framework solely to enforce them.
+GitHub Actions now runs the existing `npm run check` on pull requests and pushes
+to `main`, using `.nvmrc` and the committed lockfile. It checks source and test
+types and runs the full test suite. Proposed future diff-only checks are new
+parked-copy filenames and newly copied complete test-config literals; these
+debt-specific rules remain proposals.
 
 ## Final validation and totals
 
@@ -69,6 +72,12 @@ was added. The changes remove 897 TypeScript lines net, including tests, with
 no dependency additions or removals. All three authorized rows are complete;
 the checks below remain decisions outside this slice. The HTML audit snapshot
 is an untracked review artifact.
+
+The initial CI workflow passed `actionlint` 1.7.12. After adding it,
+`npm run check` passed again on Node 22.22.0 in 3.97 s, with both typechecks
+and all 139 tests passing. CI uses read-only repository permissions, pinned
+action commits, npm caching, and a ten-minute job timeout; it needs no service
+credentials and does not deploy the bot.
 
 ## Checked and left alone
 

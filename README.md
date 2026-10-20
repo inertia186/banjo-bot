@@ -42,6 +42,8 @@ npm run dev
 npm run check
 ```
 
+GitHub Actions runs `npm run check` on pull requests and pushes to `main`, using the Node version in `.nvmrc` and a clean install from `package-lock.json`. This checks source and test types and runs the full test suite without service credentials.
+
 If `npm run check` fails with `tsc: not found`, install dev dependencies before running checks. If npm warns about `EBADENGINE`, upgrade Node first:
 
 ```sh
