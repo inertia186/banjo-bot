@@ -162,9 +162,10 @@ Cosgrove also had a message listener for condenser-style post URLs that remember
 
 The legacy bot has 116 sound files under `support/sounds`. Voice playback should be ported only after the Discord client and deployment environment are stable because it adds native/audio dependencies.
 
-## HAFBE Candidates
+## Historical HAFBE Investigation
 
-Use HAF Block Explorer for historical queries that are awkward or expensive through public bridge/condenser APIs.
-
-- `age`: canonical post timestamp lookup by author/permlink.
-- Account operation history features that previously depended on HiveSQL.
+The first-post lookup originally used HAF Block Explorer. Its permlink timestamps
+could describe later edits rather than original post creation, so `$first` now
+uses Hive RPC account history and `$age` uses Hive RPC content creation time.
+The unused HAFBE adapter and its configuration have been removed. See
+`docs/api-notes.md` for the endpoint findings and historical examples.

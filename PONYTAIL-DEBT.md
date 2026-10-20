@@ -20,14 +20,14 @@ excluded from source-debt measurements. No committed changes occurred in the
 
 ## Authorized ledger
 
-### 1. Unused HAFBE adapter — planned
+### 1. Unused HAFBE adapter — complete
 
 The unreachable client has 82 lines and its dedicated tests have 185 lines.
 Its config field also appears in twelve complete test fixtures.
 
 - ceiling: config and test maintenance for a client the bot never constructs.
 - upgrade: remove the adapter, dedicated tests, environment setting, and config fields; retain the documented Hive RPC semantics for `$first`.
-- owner: Anthony. Trigger: approved cleanup; complete after checks pass.
+- owner: Anthony. Approved removal passed the combined source/test typecheck and all 138 retained tests; four HAFBE-only tests were intentionally removed.
 
 ### 2. Copied test defaults — planned
 

@@ -18,9 +18,6 @@ const config: AppConfig = {
     sourcePath: null,
     maxAgeDays: 30,
   },
-  hafbe: {
-    baseUrl: null,
-  },
   hyperion: {
     baseUrl: "https://hyperion.test",
     bearerToken: "hyp_at_secret",
