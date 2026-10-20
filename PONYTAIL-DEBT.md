@@ -29,13 +29,13 @@ Its config field also appears in twelve complete test fixtures.
 - upgrade: remove the adapter, dedicated tests, environment setting, and config fields; retain the documented Hive RPC semantics for `$first`.
 - owner: Anthony. Approved removal passed the combined source/test typecheck and all 138 retained tests; four HAFBE-only tests were intentionally removed.
 
-### 2. Copied test defaults — planned
+### 2. Copied test defaults — complete
 
 Twelve 68-line AppConfig literals repeat 816 lines before removing HAFBE.
 
 - ceiling: every new config field requires unrelated test edits.
 - upgrade: one factory returning fresh, safe test defaults and explicit per-test overrides.
-- owner: Anthony. Trigger: approved cleanup; preserve fixture values and prove mutable defaults are independent.
+- owner: Anthony. All eleven retained fixture values matched their originals exactly. A new test proves mutable defaults are independent; the combined typecheck and all 139 tests passed.
 
 ### 3. Mixed Hive command features — planned
 
