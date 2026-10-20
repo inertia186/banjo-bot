@@ -37,17 +37,24 @@ Twelve 68-line AppConfig literals repeat 816 lines before removing HAFBE.
 - upgrade: one factory returning fresh, safe test defaults and explicit per-test overrides.
 - owner: Anthony. All eleven retained fixture values matched their originals exactly. A new test proves mutable defaults are independent; the combined typecheck and all 139 tests passed.
 
-### 3. Mixed Hive command features — planned
+### 3. Mixed Hive command features — complete
 
 `src/commands/hive.ts` has 4,873 lines and 262 functions covering unrelated features.
 
 - ceiling: proposal and search work shares a file with account reports, token math, and NFT controls.
 - upgrade: move proposal and search command logic, state, rendering, and handlers into focused modules without changing their behavior.
-- owner: Anthony. Trigger: approved cleanup; preserve all retained command and interaction tests.
+- owner: Anthony. Search and proposal/approval features now own their command logic, caches, rendering, and handlers. Existing shared functions live in a 196-line support module. All 284 declarations and all 45 Hive command definitions/order matched the originals; the combined typecheck and all 139 tests passed. The registry module fell from 4,873 to 3,148 lines.
 
 ## Second look
 
-Pending: inspect remaining references and run the audit workflow's reuse-family check.
+The reuse-family check found nearest-twin similarity of 0.03 in both source
+families; neither is evidence of another shared implementation. No remaining
+HAFBE runtime/config references or new unused-import diagnostics were found.
+The optional unused-declaration check still reports three pre-existing unused
+parameters/properties. There are no shortcut, TODO, or debug-statement markers
+in source, tests, or scripts. Binary assets and the existing UI helper copies
+remain outside the approved slice. No application HTML/CSS or generated
+application bundle exists to simplify; imports and tests check the module list.
 No deterministic PR review script exists. Proposed future diff-only checks are
 new parked-copy filenames and newly copied complete test-config literals; this
 cleanup does not introduce a CI framework solely to enforce them.
