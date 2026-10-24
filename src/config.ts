@@ -15,9 +15,6 @@ export type AppConfig = {
     sourcePath: string | null;
     maxAgeDays: number;
   };
-  hafbe: {
-    baseUrl: string | null;
-  };
   hyperion: {
     baseUrl: string;
     bearerToken: string | null;
@@ -99,9 +96,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       whitepaperPath: env.HIVE_WHITEPAPER_TEXT_PATH ?? null,
       sourcePath: env.HIVE_SOURCE_PATH ?? null,
       maxAgeDays: readNonNegativeInteger(env.HIVE_REFERENCE_MAX_AGE_DAYS, 30),
-    },
-    hafbe: {
-      baseUrl: env.HAFBE_BASE_URL?.replace(/\/+$/, "") || null,
     },
     hyperion: {
       baseUrl: env.HYPERION_BASE_URL?.replace(/\/+$/, "") || "https://www.hyperion.zone",

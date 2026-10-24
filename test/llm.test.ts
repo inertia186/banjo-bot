@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { ChannelType, type Message } from "discord.js";
 import type { ResponseCreateParamsNonStreaming } from "openai/resources/responses/responses";
 import type { Command } from "../src/commands/types.js";
-import type { AppConfig } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 import type { HiveApi } from "../src/hive/api.js";
 import type { HyperionApi } from "../src/hyperion/api.js";
 import type { Logger } from "../src/logger.js";
@@ -23,74 +23,12 @@ const logger: Logger = {
   error: () => undefined,
 };
 
-const config: AppConfig = {
-  discordToken: "test-token",
-  commandPrefix: "$",
-  channels: null,
-  logLevel: "silent",
-  hive: {
-    nodes: ["https://example.test"],
-    nodesSourceUrl: "https://developers.test/hive_full_nodes.html",
-    requestTimeoutMs: 1_000,
-  },
-  hiveReferences: {
-    whitepaperPath: null,
-    sourcePath: null,
-    maxAgeDays: 30,
-  },
-  hafbe: {
-    baseUrl: null,
-  },
-  hyperion: {
-    baseUrl: "https://hyperion.test",
-    bearerToken: null,
-    digestLimit: 10,
-    ownerIds: new Set(),
-  },
-  hiveSql: {
-    provider: "hivesql",
-    enabled: false,
-    server: "sql.hivesql.io",
-    database: "DBHive",
-    username: null,
-    password: null,
-    wildcardLimit: 50,
-  },
-  hafSql: {
-    enabled: false,
-    host: "hafsql.test",
-    port: 5432,
-    database: "haf_block_log",
-    username: null,
-    password: null,
-    ssl: false,
-    statementTimeoutMs: 8_000,
-    maxPoolSize: 3,
-  },
-  market: {
-    coinGeckoBaseUrl: "https://coingecko.test",
-    requestTimeoutMs: 1_000,
-  },
-  hiveEngine: {
-    contractsUrl: "https://hive-engine.test/rpc/contracts",
-    scotApiUrl: "https://scot.test",
-  },
-  splinterlands: {
-    baseUrl: "https://splinterlands.test",
-  },
-  giphy: {
-    apiKey: null,
-    requestTimeoutMs: 1_000,
-  },
-  llm: {
-    enabled: true,
-    provider: "openai",
-    model: "test-model",
-    maxHistory: 2,
-    maxOutputTokens: 64,
-    openAiApiKey: "test-key",
-  },
-};
+const config = testConfig({
+  LLM_ENABLED: "true",
+  LLM_MAX_HISTORY: "2",
+  LLM_MAX_OUTPUT_TOKENS: "64",
+  OPENAI_API_KEY: "test-key",
+});
 
 function dmMessage(content: string, authorId = "user-1"): Message {
   return message({
